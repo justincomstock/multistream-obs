@@ -1,0 +1,45 @@
+# Builds Multistream for OBS on Windows: OBS's plugin template build
+# (.github/scripts), then the installer (installer/) and a zip.
+name: Build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+      - name: Installer and zip
+        run: |
+          $version = (Get-Content buildspec.json -Raw | ConvertFrom-Json).version
+          $src = Resolve-Path release/RelWithDebInfo/multistream
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $nsis)) { choco install nsis -y --no-progress | Out-Null }
+          & $nsis /V2 "/DVERSION=$version" "/DSRC=$src" installer/multistream-obs.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Move-Item "installer/Multistream-OBS-Setup-$version.exe" out/
+          # The zip: unpack into C:\ProgramData\obs-studio\plugins (no .pdb).
+          New-Item -ItemType Directory -Force zip/multistream/bin/64bit | Out-Null
+          Copy-Item "$src/bin/64bit/multistream.dll" zip/multistream/bin/64bit/
+          Copy-Item -Recurse "$src/data" zip/multistream/
+          Copy-Item LICENSE, installer/README.txt zip/multistream/
+          Compress-Archive -Path zip/multistream -DestinationPath "out/multistream-obs-$version-windows-x64.zip"
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multistream-obs-windows-x64
+          path: release/RelWithDebInfo
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multistream-obs-setup
+          path: out
+          if-no-files-found: error
