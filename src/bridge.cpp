@@ -1,5 +1,6 @@
 #include "bridge.hpp"
 
+#include "http.hpp"
 #include "obs-state.hpp"
 #include "relay-output.hpp"
 
@@ -13,11 +14,6 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QNetworkAccessManager>
-#include <QNetworkCookie>
-#include <QNetworkCookieJar>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QPointer>
 #include <QRandomGenerator>
 #include <QRegularExpression>
@@ -32,14 +28,6 @@ namespace {
 
 const quint16 PREFERRED_PORT = 14590;
 const qint64 MAX_BODY = 4 * 1024 * 1024;
-
-// The cloud's answers never set cookies here: the account is the bearer
-// token the plugin adds, nothing else.
-class NoCookies : public QNetworkCookieJar {
-public:
-	bool setCookiesFromUrl(const QList<QNetworkCookie> &, const QUrl &) override { return false; }
-	QList<QNetworkCookie> cookiesForUrl(const QUrl &) const override { return {}; }
-};
 
 QByteArray reason(int code)
 {
@@ -159,8 +147,9 @@ Bridge::Bridge(RelayOutput *relay) : relay_(relay) {}
 
 Bridge::~Bridge()
 {
+	// Requests still running finish first: their answers go to server_.
+	delete http_;
 	delete server_;
-	delete net_;
 }
 
 bool Bridge::start()
@@ -176,8 +165,7 @@ bool Bridge::start()
 		secret_ += QString::number(QRandomGenerator::system()->generate(), 16).rightJustified(8, '0');
 
 	server_ = new QTcpServer();
-	net_ = new QNetworkAccessManager();
-	net_->setCookieJar(new NoCookies());
+	http_ = new HttpClient(userAgent());
 	QObject::connect(server_, &QTcpServer::newConnection, server_, [this]() { accept(); });
 	// A fixed port when it's free, so the page keeps the same address (and
 	// its small browser-side settings) between OBS sessions.
@@ -320,18 +308,15 @@ void Bridge::servePage(QTcpSocket *s, const QByteArray &rawPath)
 	const bool index = path == "/index.html";
 	const QString cacheFile = configPath("dock-cache/") + QString::fromUtf8(path.mid(1)).replace('/', '_');
 
-	QNetworkRequest req(QUrl(cloud_ + "/web/obs-dock" + QString::fromUtf8(path)));
-	req.setTransferTimeout(index ? 6000 : 15000);
-	req.setRawHeader("Cache-Control", "no-cache");
-	req.setRawHeader("User-Agent", userAgent());
-	QNetworkReply *rep = net_->get(req);
+	HttpRequestSpec req;
+	req.url = cloud_ + "/web/obs-dock" + QString::fromUtf8(path);
+	req.timeoutMs = index ? 6000 : 15000;
+	req.headers.insert("Cache-Control", "no-cache");
 	QPointer<QTcpSocket> sp(s);
-	QObject::connect(rep, &QNetworkReply::finished, rep, [this, rep, sp, path, index, cacheFile]() {
-		rep->deleteLater();
-		const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+	http_->send(req, server_, [this, sp, path, index, cacheFile](const HttpResult &res) {
 		QByteArray body;
-		if (rep->error() == QNetworkReply::NoError && code == 200) {
-			body = rep->readAll();
+		if (res.status == 200) {
+			body = res.body;
 			QDir().mkpath(QFileInfo(cacheFile).path());
 			QFile f(cacheFile);
 			if (f.open(QIODevice::WriteOnly))
@@ -367,33 +352,33 @@ void Bridge::servePage(QTcpSocket *s, const QByteArray &rawPath)
 
 void Bridge::proxy(QTcpSocket *s, const HttpRequest &r, const QString &url, bool cloud)
 {
-	QNetworkRequest req{QUrl(url)};
-	req.setTransferTimeout(20000);
-	req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+	HttpRequestSpec req;
+	req.method = r.method;
+	req.url = url;
+	req.body = r.body;
+	req.timeoutMs = 20000;
+	req.followRedirects = false;
 	const QByteArray type = r.headers.value("content-type");
 	if (!type.isEmpty())
-		req.setHeader(QNetworkRequest::ContentTypeHeader, type);
-	req.setRawHeader("Accept", "application/json");
-	req.setRawHeader("User-Agent", userAgent());
-	req.setRawHeader("X-Multistream-Client", "obs-plugin");
+		req.headers.insert("Content-Type", type);
+	req.headers.insert("Accept", "application/json");
+	req.headers.insert("X-Multistream-Client", "obs-plugin");
 	if (cloud && !token_.isEmpty())
-		req.setRawHeader("Authorization", "Bearer " + token_.toUtf8());
+		req.headers.insert("Authorization", "Bearer " + token_.toUtf8());
 
-	QNetworkReply *rep = net_->sendCustomRequest(req, r.method, r.body);
 	QPointer<QTcpSocket> sp(s);
 	const bool poll = cloud && r.path == "/cloud/api/auth/app-link/poll";
 	const bool logout = cloud && r.path == "/cloud/api/auth/logout";
-	QObject::connect(rep, &QNetworkReply::finished, rep, [this, rep, sp, cloud, poll, logout]() {
-		rep->deleteLater();
-		const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+	http_->send(req, server_, [this, sp, cloud, poll, logout](const HttpResult &res) {
+		const int code = res.status;
 		if (code == 0) {
 			QJsonObject o = errorJson(cloud ? "Can't reach Multistream." : "The Multistream app isn't open.");
 			o["unreachable"] = true;
 			replyJson(sp, 502, o);
 			return;
 		}
-		QByteArray body = rep->readAll();
-		QByteArray ctype = rep->header(QNetworkRequest::ContentTypeHeader).toByteArray();
+		QByteArray body = res.body;
+		QByteArray ctype = res.contentType;
 		if (ctype.isEmpty())
 			ctype = "application/json";
 		// "Sign in with your browser" finished: the plugin keeps the token,

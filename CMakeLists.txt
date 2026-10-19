@@ -21,6 +21,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Network)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
+if(OS_WINDOWS)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp)
+endif()
 target_compile_options(
   ${CMAKE_PROJECT_NAME}
   PRIVATE $<$<C_COMPILER_ID:Clang,AppleClang>:-Wno-quoted-include-in-framework-header -Wno-comma>
@@ -38,6 +41,7 @@ target_sources(
     src/plugin-main.cpp
     src/dock.cpp
     src/bridge.cpp
+    src/http.cpp
     src/obs-state.cpp
     src/relay-output.cpp
 )

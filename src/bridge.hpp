@@ -6,7 +6,7 @@
 
 class QTcpServer;
 class QTcpSocket;
-class QNetworkAccessManager;
+class HttpClient;
 class RelayOutput;
 
 struct HttpRequest {
@@ -43,7 +43,7 @@ private:
 	void saveToken(const QString &token);
 
 	QTcpServer *server_ = nullptr;
-	QNetworkAccessManager *net_ = nullptr;
+	HttpClient *http_ = nullptr;
 	RelayOutput *relay_ = nullptr;
 	QString secret_;
 	QString cloud_;
