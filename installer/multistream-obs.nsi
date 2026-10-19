@@ -29,7 +29,7 @@ VIAddVersionKey "LegalCopyright" "GPL-2.0-or-later"
 !define MUI_WELCOMEPAGE_TITLE "Multistream for OBS ${VERSION}"
 !define MUI_WELCOMEPAGE_TEXT "This adds the Multistream dock to OBS: it checks everything before you go live, then goes live on all your platforms with one button.$\r$\n$\r$\nClose OBS before you go on. Next time you open OBS, the Multistream dock is there."
 !define MUI_FINISHPAGE_TITLE "Multistream is in OBS"
-!define MUI_FINISHPAGE_TEXT "Open OBS: the Multistream dock shows up on its own. If you closed it, it's under Docks → Multistream.$\r$\n$\r$\nUsed the Multistream Twitch tool or Vertical tool scripts before? The dock tells you if one needs removing."
+!define MUI_FINISHPAGE_TEXT "Open OBS: the Multistream dock and the Vertical Scenes, Sources, Preview and Mixer docks show up on their own. Closed one? It's under Docks.$\r$\n$\r$\nUsed the Multistream Twitch tool or Vertical tool scripts before? The dock tells you if one needs removing."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH

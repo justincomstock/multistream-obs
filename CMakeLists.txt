@@ -44,6 +44,14 @@ target_sources(
     src/http.cpp
     src/obs-state.cpp
     src/relay-output.cpp
+    src/vertical/audio-mix.cpp
+    src/vertical/canvas.cpp
+    src/vertical/docks.cpp
+    src/vertical/items.cpp
+    src/vertical/migrate.cpp
+    src/vertical/record.cpp
+    src/vertical/preview.cpp
+    src/vertical/websocket.cpp
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

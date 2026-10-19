@@ -8,6 +8,7 @@ class QTcpServer;
 class QTcpSocket;
 class HttpClient;
 class RelayOutput;
+class VerticalCanvas;
 
 struct HttpRequest {
 	QByteArray method;
@@ -22,13 +23,14 @@ struct HttpRequest {
 //                   and kept on disk, so it still opens when offline
 //   /cloud/...      Multistream Cloud's API, with the account's sign-in added
 //   /app/...        the Multistream app on this PC (Free plan: This PC)
-//   /bridge/...     OBS itself: state, Go live, End, settings fixes
+//   /bridge/...     OBS itself: state, Go live, End, settings fixes, and the
+//                   vertical canvas (bridge/vertical...)
 // Everything but the page needs the X-MS-Bridge secret the page is served
 // with, so no website can drive OBS through it; the Host must be this
 // address (no DNS rebinding).
 class Bridge {
 public:
-	explicit Bridge(RelayOutput *relay);
+	Bridge(RelayOutput *relay, RelayOutput *verticalRelay, VerticalCanvas *vertical);
 	~Bridge();
 	bool start();
 	QString pageUrl() const;
@@ -45,6 +47,8 @@ private:
 	QTcpServer *server_ = nullptr;
 	HttpClient *http_ = nullptr;
 	RelayOutput *relay_ = nullptr;
+	RelayOutput *verticalRelay_ = nullptr;
+	VerticalCanvas *vertical_ = nullptr;
 	QString secret_;
 	QString cloud_;
 	QString app_;

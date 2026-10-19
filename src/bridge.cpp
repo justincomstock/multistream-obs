@@ -3,6 +3,7 @@
 #include "http.hpp"
 #include "obs-state.hpp"
 #include "relay-output.hpp"
+#include "vertical/canvas.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -143,7 +144,12 @@ struct Conn {
 
 } // namespace
 
-Bridge::Bridge(RelayOutput *relay) : relay_(relay) {}
+Bridge::Bridge(RelayOutput *relay, RelayOutput *verticalRelay, VerticalCanvas *vertical)
+	: relay_(relay),
+	  verticalRelay_(verticalRelay),
+	  vertical_(vertical)
+{
+}
 
 Bridge::~Bridge()
 {
@@ -407,6 +413,9 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		QJsonObject o;
 		o["obs"] = obsstate::snapshot();
 		o["relay"] = relay_->state();
+		QJsonObject v = vertical_->state();
+		v["output"] = verticalRelay_->state();
+		o["vertical"] = v;
 		o["signedIn"] = !token_.isEmpty();
 		o["version"] = PLUGIN_VERSION;
 		o["cloud"] = cloud_;
@@ -445,6 +454,23 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		relay_->configure(in.value("enabled").toBool(), in.value("server").toString(), in.value("key").toString(),
 				  in.value("bitrate").toInt(6000));
 		replyJson(s, 200, relay_->state());
+	} else if (p == "vertical") {
+		verticalRelay_->configure(in.value("enabled").toBool(), in.value("server").toString(),
+					  in.value("key").toString(), in.value("bitrate").toInt(6000));
+		replyJson(s, 200, verticalRelay_->state());
+	} else if (p == "vertical/start") {
+		if (verticalRelay_->startNow())
+			replyJson(s, 200, verticalRelay_->state());
+		else
+			replyJson(s, 409, errorJson(verticalRelay_->state().value("error").toString()));
+	} else if (p == "vertical/stop") {
+		verticalRelay_->stopNow();
+		replyJson(s, 200, verticalRelay_->state());
+	} else if (p == "vertical/scene") {
+		if (vertical_->setScene(in.value("scene").toString(), error))
+			replyJson(s, 200, vertical_->state());
+		else
+			replyJson(s, 409, errorJson(error));
 	} else if (p == "open") {
 		const QString url = in.value("url").toString();
 		if (!url.startsWith(cloud_ + "/")) {

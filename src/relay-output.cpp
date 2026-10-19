@@ -65,9 +65,26 @@ template<typename F> void onUi(F fn)
 
 } // namespace
 
+RelayOutput::RelayOutput(const char *file, const char *name, const char *feed)
+	: file_(file),
+	  name_(name),
+	  feed_(feed),
+	  video_([]() { return obs_get_video(); }),
+	  audio_([]() { return obs_get_audio(); })
+{
+}
+
+void RelayOutput::setMedia(std::function<video_t *()> video, std::function<audio_t *()> audio,
+			   std::function<QString()> sig)
+{
+	video_ = std::move(video);
+	audio_ = std::move(audio);
+	mediaSig_ = std::move(sig);
+}
+
 void RelayOutput::load()
 {
-	char *file = obs_module_config_path("relay.json");
+	char *file = obs_module_config_path(file_.toUtf8().constData());
 	if (obs_data_t *d = obs_data_create_from_json_file_safe(file, "bak")) {
 		obs_data_set_default_int(d, "bitrate", 6000);
 		enabled_ = obs_data_get_bool(d, "enabled");
@@ -89,7 +106,7 @@ void RelayOutput::save() const
 	obs_data_set_string(d, "server", server_.toUtf8().constData());
 	obs_data_set_string(d, "key", key_.toUtf8().constData());
 	obs_data_set_int(d, "bitrate", bitrate_);
-	char *file = obs_module_config_path("relay.json");
+	char *file = obs_module_config_path(file_.toUtf8().constData());
 	obs_data_save_json_safe(d, file, "tmp", "bak");
 	bfree(file);
 	obs_data_release(d);
@@ -114,7 +131,7 @@ void RelayOutput::configure(bool enabled, const QString &server, const QString &
 
 QString RelayOutput::sig() const
 {
-	return server_ + "|" + key_ + "|" + QString::number(bitrate_);
+	return server_ + "|" + key_ + "|" + QString::number(bitrate_) + "|" + (mediaSig_ ? mediaSig_() : QString());
 }
 
 void RelayOutput::releaseAll()
@@ -145,12 +162,21 @@ void RelayOutput::releaseAll()
 
 bool RelayOutput::build()
 {
+	video_t *video = video_();
+	audio_t *audio = audio_();
+	if (!video || !audio) {
+		error_ = feed_ == "vertical" ? "The vertical canvas isn't ready yet." : "OBS's video isn't ready yet.";
+		return false;
+	}
+	const QByteArray name = name_.toUtf8();
 	obs_data_t *ss = obs_data_create();
 	obs_data_set_string(ss, "server", server_.toUtf8().constData());
 	// The query tells Multistream this stream comes from the plugin.
-	const QString key = key_ + "?client=" + CLIENT + "&v=" + PLUGIN_VERSION;
+	QString key = key_ + "?client=" + CLIENT + "&v=" + PLUGIN_VERSION;
+	if (feed_ != "main")
+		key += "&feed=" + feed_;
 	obs_data_set_string(ss, "key", key.toUtf8().constData());
-	service_ = obs_service_create("rtmp_custom", "Multistream output service", ss, nullptr);
+	service_ = obs_service_create("rtmp_custom", (name + " service").constData(), ss, nullptr);
 	obs_data_release(ss);
 
 	obs_data_t *vs = obs_data_create();
@@ -161,7 +187,7 @@ bool RelayOutput::build()
 	obs_data_set_string(vs, "preset", "veryfast"); // x264
 	obs_data_set_string(vs, "preset2", "p5");      // NVENC
 	for (const Enc &e : ENCODERS) {
-		venc_ = obs_video_encoder_create(e.id, "Multistream video", vs, nullptr);
+		venc_ = obs_video_encoder_create(e.id, (name + " video").constData(), vs, nullptr);
 		if (venc_) {
 			encoder_ = e.label;
 			break;
@@ -173,22 +199,22 @@ bool RelayOutput::build()
 		releaseAll();
 		return false;
 	}
-	obs_encoder_set_video(venc_, obs_get_video());
+	obs_encoder_set_video(venc_, video);
 
 	obs_data_t *as = obs_data_create();
 	obs_data_set_int(as, "bitrate", 160);
-	aenc_ = obs_audio_encoder_create("ffmpeg_aac", "Multistream audio", as, 0, nullptr);
+	aenc_ = obs_audio_encoder_create("ffmpeg_aac", (name + " audio").constData(), as, 0, nullptr);
 	if (!aenc_)
-		aenc_ = obs_audio_encoder_create("CoreAudio_AAC", "Multistream audio", as, 0, nullptr);
+		aenc_ = obs_audio_encoder_create("CoreAudio_AAC", (name + " audio").constData(), as, 0, nullptr);
 	obs_data_release(as);
 	if (!aenc_) {
 		error_ = "No AAC audio encoder could be made.";
 		releaseAll();
 		return false;
 	}
-	obs_encoder_set_audio(aenc_, obs_get_audio());
+	obs_encoder_set_audio(aenc_, audio);
 
-	output_ = obs_output_create("rtmp_output", "Multistream output", nullptr, nullptr);
+	output_ = obs_output_create("rtmp_output", name.constData(), nullptr, nullptr);
 	if (!output_) {
 		error_ = "OBS couldn't make the Multistream output.";
 		releaseAll();
@@ -232,9 +258,26 @@ bool RelayOutput::startOutput()
 	return true;
 }
 
+bool RelayOutput::startNow()
+{
+	if (!enabled_) {
+		error_ = "Add the Multistream server and stream key first.";
+		return false;
+	}
+	manual_ = true;
+	wanted_ = true;
+	return startOutput();
+}
+
+void RelayOutput::stopNow()
+{
+	stopOutput();
+}
+
 void RelayOutput::stopOutput()
 {
 	wanted_ = false;
+	manual_ = false;
 	if (output_)
 		obs_output_stop(output_);
 	sending_ = false;
@@ -246,7 +289,7 @@ void RelayOutput::onFrontendEvent(int event)
 	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED && enabled_) {
 		wanted_ = true;
 		startOutput();
-	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPING) {
+	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPING && !manual_) {
 		stopOutput();
 	}
 }
@@ -255,7 +298,7 @@ void RelayOutput::tick()
 {
 	if (!wanted_ || attempting_ || (output_ && obs_output_active(output_)) || now() - lastTry_ < RETRY_MS)
 		return;
-	if (!enabled_ || !obs_frontend_streaming_active())
+	if (!enabled_ || (!manual_ && !obs_frontend_streaming_active()))
 		wanted_ = false;
 	else
 		startOutput();
@@ -272,7 +315,9 @@ void RelayOutput::shutdown()
 QJsonObject RelayOutput::state() const
 {
 	QJsonObject o;
+	o["feed"] = feed_;
 	o["enabled"] = enabled_;
+	o["manual"] = manual_;
 	o["server"] = server_;
 	o["bitrate"] = bitrate_;
 	o["sending"] = sending_;
