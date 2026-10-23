@@ -37,14 +37,16 @@ VIAddVersionKey "LegalCopyright" "GPL-2.0-or-later"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
-; OBS holds the plugin open while it runs.
+; OBS holds the plugin open while it runs. Run silently (/S, by the themed
+; installer in installer/, which waits for OBS to close first), it stops
+; with exit code 2 instead of asking.
 !macro WAIT_FOR_OBS
   retry:
   nsExec::ExecToStack 'cmd /c tasklist /FI "IMAGENAME eq obs64.exe" /NH | find /I "obs64.exe"'
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 +3
-  MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "OBS is open. Close OBS, then press Retry." IDRETRY retry
+  MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "OBS is open. Close OBS, then press Retry." /SD IDCANCEL IDRETRY retry
   Abort
 !macroend
 
