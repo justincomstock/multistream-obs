@@ -22,7 +22,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Network)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
 if(OS_WINDOWS)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp advapi32)
 endif()
 target_compile_options(
   ${CMAKE_PROJECT_NAME}
@@ -51,6 +51,7 @@ target_sources(
     src/vertical/migrate.cpp
     src/vertical/record.cpp
     src/vertical/preview.cpp
+    src/vertical/theme.cpp
     src/vertical/websocket.cpp
 )
 

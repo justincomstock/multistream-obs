@@ -3,16 +3,17 @@
 #include "canvas.hpp"
 #include "preview.hpp"
 #include "record.hpp"
+#include "theme.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 #include <util/platform.h>
 
-#include <QCheckBox>
 #include <QDesktopServices>
 #include <QDockWidget>
-#include <QGridLayout>
+#include <QEvent>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -24,7 +25,6 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
-#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
@@ -46,8 +46,16 @@ QPointer<QWidget> sourcesDock;
 QPointer<QWidget> previewDock;
 QPointer<QWidget> mixerDock;
 QPointer<QListWidget> list;
-QPointer<QCheckBox> follow;
-QPointer<QLabel> previewLabel;
+QPointer<vtheme::Switch> follow;
+QPointer<QLabel> liveLabel;
+QPointer<QLabel> sceneLabel;
+QPointer<QLabel> sizeLabel;
+std::function<QJsonObject()> liveState;
+QPointer<QScrollArea> mixerScroll;
+int stripHeight = 80; // the mixer's faders and meters: fitStrips() fits them to the dock
+QPointer<QLabel> followSub;
+QPointer<QLabel> lockShowHead;
+int recordWords = 2;        // the preview dock's width: 2 full words, 1 short, 0 icons only
 QPointer<QTreeWidget> items;
 QPointer<QLabel> itemsTitle;
 QPointer<QWidget> mixerRows;
@@ -72,13 +80,116 @@ void warn(const QString &error)
 	QMessageBox::warning(scenesDock, "Multistream Vertical", error);
 }
 
-QToolButton *toolButton(const QString &text, const QString &tip)
+// pill: the button's look in theme.cpp (ghost, rec, soft, round, square, key).
+QToolButton *toolButton(const QString &text, const QString &tip, const char *pill = "square")
 {
 	auto *b = new QToolButton();
 	b->setText(text);
 	b->setToolTip(tip);
 	b->setAutoRaise(true);
+	b->setProperty("pill", pill);
+	b->setCursor(Qt::PointingHandCursor);
 	return b;
+}
+
+// Calls fit() whenever the watched widget is resized: docks squeeze or drop
+// what doesn't fit (no moc needed for an event filter).
+class Fit : public QObject {
+public:
+	Fit(QWidget *watched, std::function<void()> fit) : QObject(watched), fit_(std::move(fit))
+	{
+		watched->installEventFilter(this);
+	}
+	bool eventFilter(QObject *, QEvent *e) override
+	{
+		if (e->type() == QEvent::Resize)
+			fit_();
+		return false;
+	}
+
+private:
+	std::function<void()> fit_;
+};
+
+// An icon-only button: icon is a vtheme::lineIcon name.
+QToolButton *iconButton(const char *icon, const QString &tip, const char *pill = "square")
+{
+	QToolButton *b = toolButton(QString(), tip, pill);
+	b->setIcon(vtheme::lineIcon(QString::fromLatin1(icon)));
+	b->setIconSize(QSize(14, 14));
+	b->setAccessibleName(tip);
+	return b;
+}
+
+// A dock's root: the Multistream dock's look for it and everything in it.
+QWidget *dockRoot(const char *name, int minW, int minH)
+{
+	auto *w = new QWidget();
+	w->setObjectName(name);
+	w->setMinimumSize(minW, minH);
+	w->setAttribute(Qt::WA_StyledBackground);
+	w->setStyleSheet(vtheme::style());
+	return w;
+}
+
+// The dock's contents, in a scroll area: when OBS makes the dock smaller
+// than they need (it does, in a full column), they scroll instead of being
+// squeezed on top of each other. Returns the widget to lay them out in.
+QWidget *scrolled(QWidget *root)
+{
+	auto *outer = new QVBoxLayout(root);
+	outer->setContentsMargins(0, 0, 0, 0);
+	auto *scroll = new QScrollArea();
+	scroll->setObjectName("vScroll");
+	scroll->viewport()->setObjectName("vScrollView");
+	scroll->setFrameShape(QFrame::NoFrame);
+	scroll->setWidgetResizable(true);
+	scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	auto *inner = new QWidget();
+	inner->setObjectName("vInner");
+	scroll->setWidget(inner);
+	outer->addWidget(scroll);
+	return inner;
+}
+
+// "+ Add scene", "+ Add", "+": as much as the dock's width allows.
+void fitAdd(QToolButton *add, int width, const QString &full)
+{
+	add->setText(width >= 320 ? full : width >= 250 ? QString("+ Add") : QString("+"));
+}
+
+// The spaced capitals over a list ("IN “GAMEPLAY”").
+QLabel *headLabel(const QString &text)
+{
+	auto *l = new QLabel(text);
+	l->setProperty("role", "head");
+	l->setFont(vtheme::head());
+	l->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	return l;
+}
+
+QLabel *roleLabel(const QString &text, const char *role)
+{
+	auto *l = new QLabel(text);
+	l->setProperty("role", role);
+	return l;
+}
+
+QFrame *hline()
+{
+	auto *f = new QFrame();
+	f->setProperty("role", "line");
+	return f;
+}
+
+// A control centred in a list cell; clicks beside it still select the row.
+QWidget *cell(QWidget *control)
+{
+	auto *w = new QWidget();
+	auto *l = new QHBoxLayout(w);
+	l->setContentsMargins(4, 0, 4, 0);
+	l->addWidget(control, 0, Qt::AlignCenter);
+	return w;
 }
 
 QStringList mainScenes()
@@ -123,15 +234,12 @@ void refreshScenes()
 		QStringList mains;
 		for (const QJsonValue m : s.value("mains").toArray())
 			mains << m.toObject().value("name").toString();
-		auto *it = new QListWidgetItem(mains.isEmpty() ? name : QString("%1   ← %2").arg(name, mains.join(", ")));
+		auto *it = new QListWidgetItem(name);
 		it->setData(Qt::UserRole, name);
+		it->setData(vtheme::SceneDelegate::OnAirRole, s.value("current").toBool());
+		it->setData(vtheme::SceneDelegate::MainsRole, mains.join(", "));
 		it->setToolTip(mains.isEmpty() ? QString("Shows when the main scene called \"%1\" is on air, if there is one.").arg(name)
 					       : "Shows when these main scenes are on air: " + mains.join(", "));
-		if (s.value("current").toBool()) {
-			QFont f = it->font();
-			f.setBold(true);
-			it->setFont(f);
-		}
 		list->addItem(it);
 		if (name == (keep.isEmpty() ? canvas->currentScene() : keep))
 			list->setCurrentItem(it);
@@ -264,14 +372,21 @@ void scenesMenu(const QPoint &pos)
 
 QWidget *makeScenesDock()
 {
-	auto *w = new QWidget();
-	w->setObjectName("multistreamVerticalScenes");
-	w->setMinimumSize(180, 160);
-	auto *layout = new QVBoxLayout(w);
-	layout->setContentsMargins(4, 4, 4, 4);
-	layout->setSpacing(4);
+	// Design 3 ("Cards"): each scene a rounded card row; no boxes around
+	// them, so a small dock spends its room on the scenes.
+	QWidget *w = dockRoot("multistreamVerticalScenes", 160, 120);
+	auto *layout = new QVBoxLayout(scrolled(w));
+	layout->setContentsMargins(0, 0, 0, 0);
+	layout->setSpacing(0);
 
 	list = new QListWidget();
+	list->setObjectName("vScenes");
+	list->setItemDelegate(new vtheme::SceneDelegate(list));
+	list->setMouseTracking(true);
+	list->viewport()->setAttribute(Qt::WA_Hover);
+	list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+	list->setMinimumHeight(30); // one row; it grows with the dock
+	list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	list->setContextMenuPolicy(Qt::CustomContextMenu);
 	list->setToolTip("Click a scene to put it on the vertical stream. Right-click for more.");
 	QObject::connect(list, &QListWidget::itemClicked, list, [](QListWidgetItem *it) {
@@ -283,13 +398,15 @@ QWidget *makeScenesDock()
 			 [](QListWidgetItem *it) { renameScene(it->data(Qt::UserRole).toString()); });
 	QObject::connect(list, &QListWidget::customContextMenuRequested, list, &scenesMenu);
 	layout->addWidget(list, 1);
+	layout->addWidget(hline());
 
 	auto *bar = new QHBoxLayout();
-	bar->setSpacing(2);
-	QToolButton *add = toolButton("+", "Add a vertical scene: empty, or laid out from a main scene");
-	QToolButton *remove = toolButton("−", "Remove the selected vertical scene");
-	QToolButton *up = toolButton("↑", "Move up");
-	QToolButton *down = toolButton("↓", "Move down");
+	bar->setContentsMargins(8, 5, 8, 5);
+	bar->setSpacing(6);
+	QToolButton *add = toolButton("+ Add scene", "Add a vertical scene: empty, or laid out from a main scene", "ghost");
+	QToolButton *remove = iconButton("minus", "Remove the selected vertical scene");
+	QToolButton *up = iconButton("up", "Move up");
+	QToolButton *down = iconButton("down", "Move down");
 	QObject::connect(add, &QToolButton::clicked, add, [add]() { addMenu(add); });
 	QObject::connect(remove, &QToolButton::clicked, remove, []() {
 		if (!selectedScene().isEmpty())
@@ -303,26 +420,45 @@ QWidget *makeScenesDock()
 		if (!selectedScene().isEmpty())
 			moveScene(selectedScene(), 1);
 	});
-	for (QToolButton *b : {add, remove, up, down})
-		bar->addWidget(b);
+	add->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+	bar->addWidget(add);
 	bar->addStretch(1);
+	for (QToolButton *b : {remove, up, down})
+		bar->addWidget(b);
 	layout->addLayout(bar);
+	layout->addWidget(hline());
 
-	follow = new QCheckBox("Follow the main scenes");
+	auto *followBox = new QWidget();
+	auto *fl = new QHBoxLayout(followBox);
+	fl->setContentsMargins(10, 5, 8, 6);
+	fl->setSpacing(10);
+	auto *ft = new QVBoxLayout();
+	ft->setSpacing(1);
+	QLabel *followTitle = roleLabel("Follow the main scenes", "title");
+	followTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	ft->addWidget(followTitle);
+	followSub = roleLabel("Switches with the main scene on air", "muted");
+	followSub->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	ft->addWidget(followSub);
+	fl->addLayout(ft, 1);
+	follow = new vtheme::Switch();
 	follow->setToolTip("When a main scene goes on air, show the vertical scene it's linked to "
 			   "(right-click a vertical scene) or the one with the same name.");
-	QObject::connect(follow, &QCheckBox::toggled, follow, [](bool on) { canvas->setFollowMain(on); });
-	layout->addWidget(follow);
+	followBox->setToolTip(follow->toolTip());
+	QObject::connect(follow, &QAbstractButton::toggled, follow, [](bool on) { canvas->setFollowMain(on); });
+	fl->addWidget(follow, 0, Qt::AlignVCenter);
+	layout->addWidget(followBox);
 
 	// Moving in from Aitum Vertical or the Vertical tool (Lua script).
 	importBox = new QWidget();
 	auto *ib = new QVBoxLayout(importBox);
-	ib->setContentsMargins(0, 4, 0, 0);
-	importText = new QLabel();
+	ib->setContentsMargins(8, 4, 8, 6);
+	importText = roleLabel(QString(), "note");
 	importText->setWordWrap(true);
 	ib->addWidget(importText);
 	auto *ibar = new QHBoxLayout();
 	importAitumButton = new QPushButton("Import Aitum's scenes");
+	importAitumButton->setProperty("pill", "soft");
 	importAitumButton->setToolTip("Copies Aitum Vertical's scenes here. Their sources are shared; Aitum's own scenes stay as they are.");
 	QObject::connect(importAitumButton, &QPushButton::clicked, importAitumButton, []() {
 		QString error;
@@ -334,6 +470,7 @@ QWidget *makeScenesDock()
 						 QString("Imported %1 scene(s) from Aitum Vertical. You can remove Aitum Vertical now.").arg(n));
 	});
 	importLuaButton = new QPushButton("Make scenes like it");
+	importLuaButton->setProperty("pill", "soft");
 	importLuaButton->setToolTip("One vertical scene per main scene, framed like the Vertical tool's picture. "
 				    "They follow your main scenes by name.");
 	QObject::connect(importLuaButton, &QPushButton::clicked, importLuaButton, []() {
@@ -353,6 +490,13 @@ QWidget *makeScenesDock()
 	ib->addLayout(ibar);
 	importBox->hide();
 	layout->addWidget(importBox);
+	// A short dock keeps the list: the Follow card drops its second line.
+	new Fit(w, [w, add, followTitle]() {
+		if (followSub)
+			followSub->setVisible(w->height() >= 280 && w->width() >= 240);
+		followTitle->setText(w->width() >= 220 ? "Follow the main scenes" : "Follow main");
+		fitAdd(add, w->width(), "+ Add scene");
+	});
 	return w;
 }
 
@@ -418,22 +562,41 @@ void refreshItems(bool force)
 		return;
 	shownItems = sig;
 	if (itemsTitle)
-		itemsTitle->setText(scene.isEmpty() ? QString("No vertical scene") : "In \"" + scene + "\"");
+		itemsTitle->setText(scene.isEmpty() ? QString("NO VERTICAL SCENE") : "IN “" + scene.toUpper() + "”");
 	const qint64 keep = preview ? preview->selected() : selectedItem();
 	items->blockSignals(true);
 	items->clear();
 	for (const QJsonValue v : arr) {
 		const QJsonObject o = v.toObject();
 		auto *it = new QTreeWidgetItem();
-		const QString kind = o.value("group").toBool() ? " (group)" : QString();
-		it->setText(0, o.value("name").toString() + kind);
+		const bool group = o.value("group").toBool(), visible = o.value("visible").toBool();
+		const QString type = o.value("type").toString();
+		const qint64 id = qint64(o.value("id").toDouble());
+		it->setText(0, o.value("name").toString() + (group ? " (group)" : QString()));
+		it->setIcon(0, vtheme::sourceIcon(type, group));
 		it->setData(0, Qt::UserRole, o.value("id").toDouble());
-		it->setToolTip(0, QString::fromUtf8(obs_source_get_display_name(o.value("type").toString().toUtf8().constData())));
-		it->setCheckState(1, o.value("visible").toBool() ? Qt::Checked : Qt::Unchecked);
-		it->setToolTip(1, "Show / hide in this vertical scene");
-		it->setCheckState(2, o.value("locked").toBool() ? Qt::Checked : Qt::Unchecked);
-		it->setToolTip(2, "Lock (can't be moved in the preview)");
+		it->setToolTip(0, QString::fromUtf8(obs_source_get_display_name(type.toUtf8().constData())));
+		if (!visible)
+			it->setForeground(0, vtheme::MUTED);
 		items->addTopLevelItem(it);
+		auto *lock = new vtheme::IconToggle(vtheme::IconToggle::Kind::Lock);
+		lock->setChecked(o.value("locked").toBool());
+		lock->setToolTip("Lock (can't be moved in the preview)");
+		QObject::connect(lock, &QAbstractButton::toggled, lock, [id](bool on) {
+			QString error;
+			if (!canvas->setItemLocked(canvas->currentScene(), id, on, error))
+				warn(error);
+		});
+		auto *show = new vtheme::Switch();
+		show->setChecked(visible);
+		show->setToolTip("Show / hide in this vertical scene");
+		QObject::connect(show, &QAbstractButton::toggled, show, [id](bool on) {
+			QString error;
+			if (!canvas->setItemVisible(canvas->currentScene(), id, on, error))
+				warn(error);
+		});
+		items->setItemWidget(it, 1, cell(lock));
+		items->setItemWidget(it, 2, cell(show));
 	}
 	items->blockSignals(false);
 	selectItem(keep);
@@ -585,40 +748,39 @@ void itemAction(const char *what)
 
 QWidget *makeSourcesDock()
 {
-	auto *w = new QWidget();
-	w->setObjectName("multistreamVerticalSources");
-	w->setMinimumSize(200, 160);
-	auto *layout = new QVBoxLayout(w);
-	layout->setContentsMargins(4, 4, 4, 4);
-	layout->setSpacing(4);
-	itemsTitle = new QLabel();
-	layout->addWidget(itemsTitle);
+	// Design 1 ("Signal strip"), like the Multistream dock's platform list.
+	QWidget *w = dockRoot("multistreamVerticalSources", 160, 120);
+	auto *layout = new QVBoxLayout(scrolled(w));
+	layout->setContentsMargins(0, 0, 0, 0);
+	layout->setSpacing(0);
+	auto *headRow = new QHBoxLayout();
+	headRow->setContentsMargins(12, 8, 12, 4);
+	itemsTitle = headLabel(QString());
+	headRow->addWidget(itemsTitle, 1);
+	lockShowHead = headLabel("LOCK · SHOW");
+	lockShowHead->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+	headRow->addWidget(lockShowHead);
+	layout->addLayout(headRow);
 
 	items = new QTreeWidget();
+	items->setObjectName("vItems");
 	items->setColumnCount(3);
-	items->setHeaderLabels({"Source", "Show", "Lock"});
+	items->setHeaderLabels({"Source", "Lock", "Show"});
+	items->setHeaderHidden(true);
+	items->setIconSize(QSize(22, 22));
+	items->setIndentation(0);
+	items->setUniformRowHeights(true);
 	items->setRootIsDecorated(false);
+	items->setMinimumHeight(34); // one row; it grows with the dock
 	items->header()->setStretchLastSection(false);
 	items->header()->setSectionResizeMode(0, QHeaderView::Stretch);
 	items->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
 	items->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
 	items->setContextMenuPolicy(Qt::CustomContextMenu);
-	items->setToolTip("The sources in the vertical scene on air, top first. Tick to show; lock to keep in place.");
+	items->setToolTip("The sources in the vertical scene on air, top first. Switch on to show; lock to keep in place.");
 	QObject::connect(items, &QTreeWidget::currentItemChanged, items, [](QTreeWidgetItem *it, QTreeWidgetItem *) {
 		if (preview)
 			preview->select(it ? qint64(it->data(0, Qt::UserRole).toDouble()) : 0);
-	});
-	QObject::connect(items, &QTreeWidget::itemChanged, items, [](QTreeWidgetItem *it, int column) {
-		const qint64 id = qint64(it->data(0, Qt::UserRole).toDouble());
-		const bool on = it->checkState(column) == Qt::Checked;
-		QString error;
-		bool ok = true;
-		if (column == 1)
-			ok = canvas->setItemVisible(canvas->currentScene(), id, on, error);
-		else if (column == 2)
-			ok = canvas->setItemLocked(canvas->currentScene(), id, on, error);
-		if (!ok)
-			warn(error);
 	});
 	QObject::connect(items, &QTreeWidget::itemDoubleClicked, items, [](QTreeWidgetItem *, int column) {
 		if (column == 0)
@@ -643,23 +805,33 @@ QWidget *makeSourcesDock()
 		menu.exec(items->viewport()->mapToGlobal(pos));
 	});
 	layout->addWidget(items, 1);
+	layout->addWidget(hline());
 
 	auto *bar = new QHBoxLayout();
-	bar->setSpacing(2);
-	QToolButton *add = toolButton("+", "Add a source: one OBS already has, or a new one");
-	QToolButton *remove = toolButton("−", "Remove the selected source from this vertical scene");
-	QToolButton *props = toolButton("⚙", "Properties");
-	QToolButton *up = toolButton("↑", "Move up");
-	QToolButton *down = toolButton("↓", "Move down");
+	bar->setContentsMargins(10, 6, 10, 8);
+	bar->setSpacing(6);
+	QToolButton *add = toolButton("+ Add source", "Add a source: one OBS already has, or a new one", "soft");
+	QToolButton *remove = iconButton("minus", "Remove the selected source from this vertical scene", "round");
+	QToolButton *props = iconButton("gear", "Properties", "round");
+	QToolButton *up = iconButton("up", "Move up", "round");
+	QToolButton *down = iconButton("down", "Move down", "round");
 	QObject::connect(add, &QToolButton::clicked, add, [add]() { addSourceMenu(add); });
 	QObject::connect(remove, &QToolButton::clicked, remove, []() { itemAction("remove"); });
 	QObject::connect(props, &QToolButton::clicked, props, []() { itemAction("properties"); });
 	QObject::connect(up, &QToolButton::clicked, up, []() { itemAction("up"); });
 	QObject::connect(down, &QToolButton::clicked, down, []() { itemAction("down"); });
-	for (QToolButton *b : {add, remove, props, up, down})
-		bar->addWidget(b);
+	add->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+	bar->addWidget(add);
 	bar->addStretch(1);
+	for (QToolButton *b : {remove, props, up, down})
+		bar->addWidget(b);
 	layout->addLayout(bar);
+	new Fit(w, [w, add, props]() {
+		if (lockShowHead)
+			lockShowHead->setVisible(w->width() >= 250);
+		fitAdd(add, w->width(), "+ Add source");
+		props->setVisible(w->width() >= 210); // double-click opens it too
+	});
 	return w;
 }
 
@@ -676,6 +848,12 @@ int mulToFader(double mul)
 	if (mul <= 0.001)
 		return 0;
 	return std::clamp(int(std::lround((20.0 * std::log10(mul) + 60.0) / 0.6)), 0, 100);
+}
+
+// The fader's level, as its strip shows it.
+QString faderText(int v)
+{
+	return v <= 0 ? QString("−∞ dB") : QString::number(-60.0 + 0.6 * v, 'f', 1) + " dB";
 }
 
 void setAudio(const QString &uuid, const QJsonObject &change)
@@ -697,123 +875,182 @@ void refreshMixer(bool force)
 		sig += o.value("uuid").toString() + o.value("name").toString() + o.value("mode").toString() +
 		       QString::number(o.value("volume").toDouble()) + (o.value("muted").toBool() ? "m" : "") + "|";
 	}
-	auto *grid = static_cast<QGridLayout *>(mixerRows->layout());
+	auto *strips = static_cast<QHBoxLayout *>(mixerRows->layout());
 	if (force || sig != shownMixer) {
 		shownMixer = sig;
-		while (QLayoutItem *li = grid->takeAt(0)) {
+		while (QLayoutItem *li = strips->takeAt(0)) {
 			delete li->widget();
 			delete li;
 		}
 		if (arr.isEmpty()) {
-			auto *none = new QLabel("No sound in the vertical scene on air.");
+			QLabel *none = roleLabel("No sound in the vertical scene on air.", "muted");
 			none->setWordWrap(true);
-			grid->addWidget(none, 0, 0, 1, 5);
+			strips->addWidget(none, 1, Qt::AlignTop);
 		}
-		int row = 0;
+		// Design 4 ("Console"): a channel strip per source, its name, level
+		// meter beside its fader, then MAIN and mute. Kept tight: the fader
+		// takes whatever height the dock has (fitStrips).
 		for (const QJsonValue v : arr) {
 			const QJsonObject o = v.toObject();
 			const QString uuid = o.value("uuid").toString();
+			const QString name = o.value("name").toString();
 			const bool own = o.value("mode").toString() == "own";
-			auto *name = new QLabel(o.value("name").toString());
-			name->setToolTip(o.value("name").toString());
-			auto *meter = new QProgressBar();
+			auto *strip = new QFrame();
+			strip->setObjectName("vStrip");
+			strip->setProperty("own", own ? "true" : "false");
+			strip->setFixedWidth(70);
+			auto *sl = new QVBoxLayout(strip);
+			sl->setContentsMargins(3, 4, 3, 4);
+			sl->setSpacing(3);
+			QLabel *label = roleLabel(QFontMetrics(vtheme::head()).elidedText(name.toUpper(), Qt::ElideRight, 62), "strip");
+			label->setFont(vtheme::head());
+			label->setAlignment(Qt::AlignCenter);
+			label->setToolTip(name);
+			auto *meter = new vtheme::Meter();
 			meter->setObjectName("meter:" + uuid);
-			meter->setRange(0, 100);
-			meter->setTextVisible(false);
-			meter->setMaximumHeight(8);
 			meter->setToolTip("What the vertical stream hears from it");
-			auto *fader = new QSlider(Qt::Horizontal);
+			meter->setFixedSize(6, stripHeight);
+			auto *fader = new QSlider(Qt::Vertical);
+			fader->setObjectName("vFader");
+			fader->setFixedSize(18, stripHeight);
 			fader->setRange(0, 100);
 			fader->setValue(mulToFader(own ? o.value("volume").toDouble() : o.value("gain").toDouble()));
 			fader->setEnabled(own);
-			fader->setToolTip(own ? "Vertical volume" : "Follows OBS's own fader (untick \"Same as main\")");
+			fader->setCursor(own ? Qt::PointingHandCursor : Qt::ArrowCursor);
+			fader->setToolTip((own ? "Vertical volume: " : "Follows OBS's own fader (turn off MAIN): ") +
+					  faderText(fader->value()));
+			QObject::connect(fader, &QSlider::valueChanged, fader, [fader](int value) {
+				fader->setToolTip("Vertical volume: " + faderText(value));
+			});
 			QObject::connect(fader, &QSlider::sliderReleased, fader, [fader, uuid]() {
 				setAudio(uuid, {{"volume", double(faderToMul(fader->value()))}});
 			});
-			auto *mute = new QToolButton();
-			mute->setCheckable(true);
+			QToolButton *same = toolButton("MAIN", "Lit: the vertical stream uses OBS's own fader and mute for it.\n"
+							       "Off: its own vertical volume and mute.", "key");
+			same->setCheckable(true);
+			same->setChecked(!own);
+			QObject::connect(same, &QToolButton::toggled, same,
+					 [uuid](bool on) { setAudio(uuid, {{"mode", on ? "same" : "own"}}); });
+			auto *mute = new vtheme::IconToggle(vtheme::IconToggle::Kind::Speaker);
 			mute->setChecked(own && o.value("muted").toBool());
 			mute->setEnabled(own);
-			mute->setText(mute->isChecked() ? "\U0001F507" : "\U0001F50A");
 			mute->setToolTip("Mute on the vertical stream only");
-			QObject::connect(mute, &QToolButton::toggled, mute,
+			QObject::connect(mute, &QAbstractButton::toggled, mute,
 					 [uuid](bool on) { setAudio(uuid, {{"muted", on}}); });
-			auto *same = new QCheckBox("Same as main");
-			same->setChecked(!own);
-			same->setToolTip("Ticked: the vertical stream uses OBS's own fader and mute for it.\n"
-					 "Unticked: its own vertical volume and mute.");
-			QObject::connect(same, &QCheckBox::toggled, same,
-					 [uuid](bool on) { setAudio(uuid, {{"mode", on ? "same" : "own"}}); });
-			name->setMinimumWidth(0);
-			grid->addWidget(name, row, 0);
-			grid->addWidget(same, row, 1);
-			grid->addWidget(mute, row, 2);
-			grid->addWidget(fader, row + 1, 0, 1, 3);
-			grid->addWidget(meter, row + 2, 0, 1, 3);
-			// A gap before the next source.
-			grid->setRowMinimumHeight(row + 3, 8);
-			row += 4;
+			auto *mid = new QHBoxLayout();
+			mid->setSpacing(5);
+			mid->addStretch(1);
+			mid->addWidget(meter);
+			mid->addWidget(fader);
+			mid->addStretch(1);
+			auto *keys = new QHBoxLayout();
+			keys->setSpacing(2);
+			keys->addStretch(1);
+			keys->addWidget(same);
+			keys->addWidget(mute);
+			keys->addStretch(1);
+			sl->addWidget(label);
+			sl->addLayout(mid, 1);
+			sl->addLayout(keys);
+			strips->addWidget(strip, 0, Qt::AlignTop);
 		}
-		grid->setRowStretch(row, 1);
+		strips->addStretch(1);
 	}
 	// The meters: peak of the last block, on the same dB scale.
 	for (const QJsonValue v : arr) {
 		const QJsonObject o = v.toObject();
-		auto *meter = mixerRows->findChild<QProgressBar *>("meter:" + o.value("uuid").toString());
+		auto *meter = static_cast<vtheme::Meter *>(mixerRows->findChild<QWidget *>("meter:" + o.value("uuid").toString()));
 		const double peak = o.value("peak").toDouble();
 		if (meter)
-			meter->setValue(peak <= 0.001 ? 0 : std::clamp(int((20.0 * std::log10(peak) + 60.0) / 0.6), 0, 100));
+			meter->setLevel(peak <= 0.001 ? 0 : std::clamp(int((20.0 * std::log10(peak) + 60.0) / 0.6), 0, 100));
 	}
+}
+
+// The faders take the dock's height, so a strip never runs off the bottom.
+// What a strip needs besides its fader (its name, MAIN and mute, gaps,
+// margins, border, the list's margins) is measured from a strip; this is
+// for when there is none yet.
+const int STRIP_CHROME = 66;
+
+void fitStrips()
+{
+	if (!mixerScroll || !mixerRows)
+		return;
+	const QMargins m = mixerRows->layout()->contentsMargins();
+	QWidget *strip = mixerRows->findChild<QWidget *>("vStrip");
+	const int chrome = strip ? strip->sizeHint().height() - stripHeight + m.top() + m.bottom() : STRIP_CHROME;
+	const int h = std::max(16, mixerScroll->viewport()->height() - chrome);
+	if (h == stripHeight)
+		return;
+	stripHeight = h;
+	for (QWidget *c : mixerRows->findChildren<QWidget *>())
+		if (c->objectName() == "vFader" || c->objectName().startsWith("meter:"))
+			c->setFixedHeight(h);
 }
 
 QWidget *makeMixerDock()
 {
-	auto *w = new QWidget();
-	w->setObjectName("multistreamVerticalMixer");
-	w->setMinimumSize(220, 120);
+	QWidget *w = dockRoot("multistreamVerticalMixer", 160, 100);
 	auto *layout = new QVBoxLayout(w);
-	layout->setContentsMargins(4, 4, 4, 4);
-	auto *hint = new QLabel("What the vertical stream hears.");
-	hint->setToolTip("Only sources in the vertical scene on air play here, plus Desktop Audio and Mic.\n"
-			 "Untick \"Same as main\" to give one its own vertical volume and mute.");
-	hint->setWordWrap(true);
-	layout->addWidget(hint);
+	layout->setContentsMargins(0, 0, 0, 0);
+	layout->setSpacing(0);
+	// No heading: the strips get the room. What it said is the tooltip.
 	auto *scroll = new QScrollArea();
+	scroll->setToolTip("Only sources in the vertical scene on air play here, plus Desktop Audio and Mic.\n"
+			   "Turn off MAIN on a source to give it its own vertical volume and mute.");
+	scroll->setObjectName("vMixScroll");
+	scroll->viewport()->setObjectName("vMixView");
 	scroll->setWidgetResizable(true);
 	scroll->setFrameShape(QFrame::NoFrame);
-	scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	mixerRows = new QWidget();
-	auto *grid = new QGridLayout(mixerRows);
-	grid->setContentsMargins(0, 0, 0, 0);
-	grid->setVerticalSpacing(2);
-	grid->setColumnStretch(0, 1);
+	mixerRows->setObjectName("vMixRows");
+	auto *strips = new QHBoxLayout(mixerRows);
+	strips->setContentsMargins(6, 6, 6, 6);
+	strips->setSpacing(4);
 	scroll->setWidget(mixerRows);
 	layout->addWidget(scroll, 1);
+	mixerScroll = scroll;
+	new Fit(scroll->viewport(), []() { fitStrips(); });
 	return w;
 }
 
 // ---- Vertical Preview -----------------------------------------------------------
 
+void refreshRecord();
+
 QWidget *makePreviewDock()
 {
-	auto *w = new QWidget();
-	w->setObjectName("multistreamVerticalPreview");
-	w->setMinimumSize(160, 240);
+	// Design 1 ("Signal strip"): the live pill and scene over the picture.
+	// Its minimum stays small: OBS squeezes a full column below the docks'
+	// minimums, and the picture (a native window) would then cover the buttons.
+	QWidget *w = dockRoot("multistreamVerticalPreview", 150, 110);
 	auto *layout = new QVBoxLayout(w);
-	layout->setContentsMargins(4, 4, 4, 4);
-	layout->setSpacing(4);
+	layout->setContentsMargins(8, 8, 8, 8);
+	layout->setSpacing(6);
+	auto *top = new QHBoxLayout();
+	top->setSpacing(8);
+	liveLabel = new QLabel();
+	liveLabel->setProperty("tone", "off");
+	top->addWidget(liveLabel);
+	sceneLabel = roleLabel(QString(), "title");
+	sceneLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	top->addWidget(sceneLabel, 1);
+	sizeLabel = roleLabel(QString(), "mono");
+	sizeLabel->setFont(vtheme::mono(11));
+	top->addWidget(sizeLabel);
+	layout->addLayout(top);
 	preview = new PreviewWidget(canvas);
+	preview->setMinimumSize(60, 40); // the dock decides; the picture letterboxes
 	preview->setToolTip("Drag to move, corners to resize (Alt: crop), Ctrl+wheel to zoom, right-click for more.");
 	preview->onSelect = [](qint64 id) { selectItem(id); };
 	layout->addWidget(preview, 1);
-	previewLabel = new QLabel();
-	previewLabel->setAlignment(Qt::AlignCenter);
-	layout->addWidget(previewLabel);
 
 	// Recording and replay buffer of the vertical picture.
 	auto *bar = new QHBoxLayout();
-	bar->setSpacing(4);
-	recButton = new QToolButton();
+	bar->setSpacing(6);
+	recButton = toolButton("Rec", QString(), "rec");
+	recButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+	recButton->setIconSize(QSize(8, 8));
 	recButton->setCheckable(true);
 	QObject::connect(recButton, &QToolButton::clicked, recButton, [](bool on) {
 		QString error;
@@ -822,7 +1059,7 @@ QWidget *makePreviewDock()
 		else if (!canvas->recorder->startRecording(error))
 			warn(error);
 	});
-	replayButton = new QToolButton();
+	replayButton = toolButton("Replay", QString(), "ghost");
 	replayButton->setCheckable(true);
 	QObject::connect(replayButton, &QToolButton::clicked, replayButton, [](bool on) {
 		QString error;
@@ -831,13 +1068,13 @@ QWidget *makePreviewDock()
 		else if (!canvas->recorder->startReplay(error))
 			warn(error);
 	});
-	saveButton = toolButton("Save", "Save a clip of the last seconds of the vertical picture");
+	saveButton = toolButton("Save clip", "Save a clip of the last seconds of the vertical picture", "ghost");
 	QObject::connect(saveButton, &QToolButton::clicked, saveButton, []() {
 		QString error;
 		if (!canvas->recorder->saveReplay(error))
 			warn(error);
 	});
-	QToolButton *more = toolButton("\u22ef", "Recording options, Twitch Dual Format");
+	QToolButton *more = iconButton("more", "Recording options, Twitch Dual Format", "round");
 	QObject::connect(more, &QToolButton::clicked, more, [more]() {
 		VerticalRecorder *r = canvas->recorder;
 		const QJsonObject st = r->state();
@@ -881,16 +1118,31 @@ QWidget *makePreviewDock()
 		});
 		menu.exec(more->mapToGlobal(QPoint(0, more->height())));
 	});
+	// Never squeezed until the words go: a narrow dock gets shorter words.
 	for (QToolButton *b : {recButton.data(), replayButton.data(), saveButton.data()})
 		b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
 	bar->addWidget(recButton);
 	bar->addWidget(replayButton);
 	bar->addWidget(saveButton);
 	bar->addStretch(1);
-	recLabel = new QLabel();
+	recLabel = roleLabel(QString(), "warn");
 	bar->addWidget(recLabel);
 	bar->addWidget(more);
 	layout->addLayout(bar);
+	// A narrow dock: shorter button words, then icons; no size next to the scene.
+	new Fit(w, [w]() {
+		const int words = w->width() >= 350 ? 2 : w->width() >= 290 ? 1 : 0;
+		if (sizeLabel)
+			sizeLabel->setVisible(w->width() >= 250);
+		if (words != recordWords) {
+			recordWords = words;
+			for (QToolButton *b : {recButton.data(), replayButton.data(), saveButton.data()})
+				b->setToolButtonStyle(words ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
+			replayButton->setIcon(words ? QIcon() : vtheme::lineIcon("replay"));
+			saveButton->setIcon(words ? QIcon() : vtheme::lineIcon("save"));
+			refreshRecord();
+		}
+	});
 	return w;
 }
 
@@ -901,17 +1153,55 @@ void refreshRecord()
 	const QJsonObject st = canvas->recorder->state();
 	const bool rec = st.value("recording").toBool(), rep = st.value("replay").toBool();
 	recButton->setChecked(rec);
-	recButton->setText(rec ? "\u25a0 Stop" : "\u25cf Rec");
+	recButton->setText(rec ? "Stop" : "Rec");
+	if (recButton->property("recIcon").toBool() != rec || recButton->icon().isNull()) {
+		recButton->setIcon(vtheme::dotIcon(rec ? vtheme::ROSE_TEXT : vtheme::ROSE, rec));
+		recButton->setProperty("recIcon", rec);
+	}
 	recButton->setToolTip(rec ? "Recording to " + st.value("lastFile").toString()
 				  : "Record the vertical picture into " + st.value("folder").toString());
 	replayButton->setChecked(rep);
-	replayButton->setText(rep ? "Replay \u2713" : "Replay");
+	replayButton->setText(rep && recordWords == 2 ? "Replay \u2713" : "Replay");
+	saveButton->setText(recordWords == 2 ? "Save clip" : "Save");
 	replayButton->setToolTip(rep ? "The vertical replay buffer is running: Save clip keeps the last seconds."
 				     : "Start the vertical replay buffer");
 	saveButton->setEnabled(rep);
 	const QString err = st.value("error").toString();
 	recLabel->setText(err.isEmpty() ? QString() : "\u26a0");
 	recLabel->setToolTip(err);
+}
+
+// The pill over the preview: is the vertical stream going to Multistream?
+void refreshLive()
+{
+	if (!liveLabel || !liveState)
+		return;
+	const QJsonObject st = liveState();
+	const QString error = st.value("error").toString();
+	QString text = "Not live", tone = "off", tip = "Goes live on Multistream with Start Streaming.";
+	if (st.value("reconnecting").toBool()) {
+		text = "Reconnecting";
+		tone = "busy";
+		tip = "The vertical stream lost its connection and is trying again.";
+	} else if (st.value("sending").toBool()) {
+		text = "LIVE";
+		tone = "live";
+		tip = "The vertical stream is going to Multistream.";
+	} else if (st.value("connecting").toBool()) {
+		text = "Connecting";
+		tone = "busy";
+		tip = "Starting the vertical stream.";
+	} else if (!error.isEmpty()) {
+		text = "Problem";
+		tone = "bad";
+		tip = error;
+	} else if (!st.value("enabled").toBool()) {
+		text = "Off";
+		tip = "The vertical stream to Multistream is turned off.";
+	}
+	liveLabel->setText("● " + text);
+	liveLabel->setToolTip(tip);
+	vtheme::setProp(liveLabel, "tone", tone);
 }
 
 void refresh(bool force = false)
@@ -925,15 +1215,16 @@ void refresh(bool force = false)
 			refreshScenes();
 		if (preview)
 			preview->sync();
-		if (previewLabel)
-			previewLabel->setText(canvas->ready() ? QString("On air: %1  ·  %2×%3")
-									.arg(canvas->currentScene())
-									.arg(canvas->width())
-									.arg(canvas->height())
-							      : QString("The vertical canvas is starting…"));
+		if (sceneLabel) {
+			sceneLabel->setText(canvas->ready() ? canvas->currentScene() : QString("The vertical canvas is starting…"));
+			sceneLabel->setToolTip(canvas->ready() ? "On air: " + canvas->currentScene() : QString());
+			sizeLabel->setText(canvas->ready() ? QString("%1×%2").arg(canvas->width()).arg(canvas->height())
+							   : QString());
+		}
 	}
 	refreshItems(changed);
 	refreshRecord();
+	refreshLive();
 }
 
 void addDock(const char *id, const char *title, QWidget *w)
@@ -946,9 +1237,10 @@ void addDock(const char *id, const char *title, QWidget *w)
 
 namespace vertical_docks {
 
-void create(VerticalCanvas *c)
+void create(VerticalCanvas *c, std::function<QJsonObject()> live)
 {
 	canvas = c;
+	liveState = std::move(live);
 	scenesDock = makeScenesDock();
 	addDock("multistream-vertical-scenes", "Vertical Scenes", scenesDock);
 	sourcesDock = makeSourcesDock();
@@ -1001,6 +1293,47 @@ void showOnFirstRun()
 			main->splitDockWidget(previewDw, dw, Qt::Vertical);
 		obs_data_set_bool(d, key.constData(), true);
 		saved = true;
+	}
+	// All four placed now (a first run): OBS would split the column evenly,
+	// leaving the picture small. Most of it goes to the preview.
+	QList<QDockWidget *> column;
+	for (QWidget *content : {previewDock.data(), mixerDock.data(), sourcesDock.data(), scenesDock.data()}) {
+		auto *dw = content ? qobject_cast<QDockWidget *>(content->parentWidget()) : nullptr;
+		if (dw && main && !dw->isFloating() && !dw->isHidden() && main->dockWidgetArea(dw) == Qt::RightDockWidgetArea)
+			column << dw;
+	}
+	if (saved && main && column.size() == 4) {
+		// resizeDocks does nothing in OBS's window, so once it is on screen
+		// the preview (38% of the column) and the mixer (24%) briefly ask
+		// for it as their minimum and the lists give way; then they let go,
+		// keeping the size.
+		QList<QPointer<QDockWidget>> held;
+		for (QDockWidget *dw : column)
+			held << dw;
+		QList<QPointer<QWidget>> grow{previewDock.data(), mixerDock.data()};
+		QTimer::singleShot(1500, main, [held, grow]() {
+			int h = 0;
+			for (const QPointer<QDockWidget> &dw : held) {
+				if (!dw || dw->isFloating() || dw->isHidden() || !dw->isVisible())
+					return;
+				h += dw->height();
+			}
+			if (h < 300 || !grow[0] || !grow[1])
+				return;
+			QList<QSize> before;
+			for (int i = 0; i < 2; ++i) {
+				before << grow[i]->minimumSize();
+				const int title = held[i]->height() - grow[i]->height();
+				grow[i]->setMinimumHeight(std::max(before[i].height(), h * (i ? 24 : 38) / 100 - title));
+			}
+			QTimer::singleShot(800, grow[0], [held, grow, before]() {
+				for (int i = 0; i < 2; ++i)
+					if (grow[i])
+						grow[i]->setMinimumSize(before[i]);
+				obs_log(LOG_INFO, "Vertical docks: preview %d, mixer %d", held[0] ? held[0]->height() : -1,
+					held[1] ? held[1]->height() : -1);
+			});
+		});
 	}
 	if (saved) {
 		char *dir = obs_module_config_path("");

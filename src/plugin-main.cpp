@@ -31,6 +31,14 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QTimer>
 
+#ifdef _WIN32
+#include <string>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
@@ -90,6 +98,31 @@ void onEvent(enum obs_frontend_event event, void *)
 		break;
 	}
 }
+#ifdef _WIN32
+// A portable OBS loads plugins only from inside its own folder
+// (obs-plugins\64bit), never from ProgramData where the installer puts them,
+// so the installer can't tell this copy is there: it's noted for it
+// (HKCU\Software\Multistream\OBS portable, one value per OBS folder) and the
+// next installer updates it too. The usual ProgramData copy isn't noted.
+void notePluginFolder()
+{
+	HMODULE self = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&notePluginFolder), &self))
+		return;
+	wchar_t buf[1024];
+	DWORD n = GetModuleFileNameW(self, buf, 1024);
+	if (n == 0 || n >= 1024)
+		return;
+	std::wstring path(buf, n);
+	const std::wstring tail = L"\\obs-plugins\\64bit\\multistream.dll";
+	if (path.size() <= tail.size() || _wcsicmp(path.c_str() + path.size() - tail.size(), tail.c_str()) != 0)
+		return;
+	std::wstring root = path.substr(0, path.size() - tail.size());
+	RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\Multistream\\OBS portable", root.c_str(), REG_SZ, root.c_str(),
+			DWORD((root.size() + 1) * sizeof(wchar_t)));
+}
+#endif
 } // namespace
 
 MODULE_EXPORT const char *obs_module_description(void)
@@ -107,8 +140,11 @@ bool obs_module_load(void)
 	verticalRecord.load();
 	vertical.recorder = &verticalRecord;
 	dock::create();
-	vertical_docks::create(&vertical);
+	vertical_docks::create(&vertical, []() { return verticalRelay.state(); });
 	obs_frontend_add_event_callback(onEvent, nullptr);
+#ifdef _WIN32
+	notePluginFolder();
+#endif
 	obs_log(LOG_INFO, "loaded (version %s)", PLUGIN_VERSION);
 	return true;
 }

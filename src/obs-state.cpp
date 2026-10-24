@@ -17,6 +17,8 @@ struct Runtime {
 	uint64_t lastBytes = 0;
 	qint64 lastAt = 0;
 	int kbps = 0;
+	// OBS's CPU use since the last snapshot (os_cpu_usage_info_query).
+	os_cpu_usage_info_t *cpu = os_cpu_usage_info_start();
 };
 Runtime rt;
 
@@ -137,6 +139,29 @@ QJsonObject obsstate::snapshot()
 		so["url"] = str(obs_service_get_connect_info(svc, OBS_SERVICE_CONNECT_INFO_SERVER_URL));
 		obs_data_release(s);
 		o["service"] = so;
+	}
+
+	// How OBS itself keeps up (the same numbers as OBS's Stats window), for
+	// the stream's health log on multistream.gg: frames it missed drawing
+	// (rendering lag) and encoding (encoding lag), counted since OBS started,
+	// its CPU use and the frame rate it's really making.
+	{
+		QJsonObject pc;
+		QJsonObject render;
+		render["lagged"] = double(obs_get_lagged_frames());
+		render["total"] = double(obs_get_total_frames());
+		pc["render"] = render;
+		if (video_t *video = obs_get_video()) {
+			QJsonObject encode;
+			encode["skipped"] = double(video_output_get_skipped_frames(video));
+			encode["total"] = double(video_output_get_total_frames(video));
+			pc["encode"] = encode;
+		}
+		if (rt.cpu)
+			pc["cpu"] = os_cpu_usage_info_query(rt.cpu);
+		pc["fps"] = obs_get_active_fps();
+		pc["memoryMB"] = double(os_get_proc_resident_size() / (1024 * 1024));
+		o["pc"] = pc;
 	}
 
 	obs_video_info ovi = {};

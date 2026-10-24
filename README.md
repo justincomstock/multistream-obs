@@ -28,9 +28,12 @@ Download it at **https://multistream.gg/download/obs** (Windows, OBS 31.1 or new
   - *Vertical Preview*: drag, resize, crop (Alt), rotate, zoom (Ctrl+wheel),
     safe-area guides, undo; record, replay buffer and Save clip below it.
   - *Vertical Mixer*: the vertical stream's own sound (`audio-mix.cpp` mixes it
-    from the sources in the vertical scene on air), per source "same as main"
-    or its own volume and mute. The main stream never hears vertical-only
-    sources.
+    from the sources in the vertical scene on air), one channel strip per
+    source: MAIN (same as main) or its own volume and mute. The main stream
+    never hears vertical-only sources.
+  - The docks wear the Multistream dock's look (`theme.cpp`): its colours,
+    pills and switches; the pill over the preview says whether the vertical
+    stream is live.
   - Its own output to Multistream (feed `vertical`), recording and replay
     buffer (following OBS's buttons by default), Twitch Dual Format, and
     importing Aitum Vertical's scenes or the Vertical tool script's framing.

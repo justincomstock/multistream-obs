@@ -1,5 +1,9 @@
 #pragma once
 
+#include <QJsonObject>
+
+#include <functional>
+
 class VerticalCanvas;
 
 // The vertical canvas's docks, next to OBS's own Scenes dock and preview:
@@ -8,9 +12,12 @@ class VerticalCanvas;
 //                     remove, and pick which main scenes it shows with
 //   Vertical Preview  what the vertical stream shows, letterboxed
 // They redraw when VerticalCanvas::version() changes. UI thread only.
+// Their look is the Multistream dock's (theme.hpp).
 namespace vertical_docks {
 
-void create(VerticalCanvas *canvas); // obs_module_load
+// obs_module_load. `live`: the vertical output's state (RelayOutput::state),
+// for the pill over the preview.
+void create(VerticalCanvas *canvas, std::function<QJsonObject()> live);
 void showOnFirstRun();                // FINISHED_LOADING
 void close();                         // EXIT
 
