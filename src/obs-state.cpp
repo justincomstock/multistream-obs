@@ -6,6 +6,12 @@
 #include <util/platform.h>
 
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QTimer>
+#include <QUrl>
+
+#include <atomic>
 
 namespace {
 
@@ -19,8 +25,24 @@ struct Runtime {
 	int kbps = 0;
 	// OBS's CPU use since the last snapshot (os_cpu_usage_info_query).
 	os_cpu_usage_info_t *cpu = os_cpu_usage_info_start();
+	// This start got as far as STREAMING_STARTED.
+	bool reached = false;
+	// How the last stream ended when it wasn't the streamer's doing (OBS
+	// refused to start, or gave up reconnecting): the dock says why.
+	qint64 stopAt = 0;
+	int stopCode = 0;
+	QString stopError;
+	bool stopStarted = false;
+	// The streaming output whose signals are watched.
+	obs_weak_output_t *watched = nullptr;
+	// What previous-service.json holds ("Twitch", a server's host), "" for none.
+	QString previous;
+	bool previousLoaded = false;
 };
 Runtime rt;
+// Set on the output's own thread: the stop code, and whether it started.
+std::atomic<long long> outCode{0};
+std::atomic<bool> outStarting{false};
 
 qint64 now()
 {
@@ -57,6 +79,119 @@ QString codecOfSimple(const QString &name)
 	return "h264";
 }
 
+QString configFile(const char *name)
+{
+	char *p = obs_module_config_path(name);
+	QString s = str(p);
+	bfree(p);
+	return s;
+}
+
+void onOutputStarting(void *, calldata_t *)
+{
+	outStarting = true;
+}
+
+void onOutputStop(void *, calldata_t *cd)
+{
+	outCode = calldata_int(cd, "code");
+}
+
+void unwatch()
+{
+	if (!rt.watched)
+		return;
+	if (obs_output_t *old = obs_weak_output_get_output(rt.watched)) {
+		signal_handler_t *sh = obs_output_get_signal_handler(old);
+		signal_handler_disconnect(sh, "starting", onOutputStarting, nullptr);
+		signal_handler_disconnect(sh, "stop", onOutputStop, nullptr);
+		obs_output_release(old);
+	}
+	obs_weak_output_release(rt.watched);
+	rt.watched = nullptr;
+}
+
+// OBS's frontend events carry no stop code: the output's own "stop" signal does.
+void watchOutput()
+{
+	obs_output_t *out = obs_frontend_get_streaming_output();
+	if (!out)
+		return;
+	if (!rt.watched || !obs_weak_output_references_output(rt.watched, out)) {
+		unwatch();
+		signal_handler_t *sh = obs_output_get_signal_handler(out);
+		signal_handler_connect(sh, "starting", onOutputStarting, nullptr);
+		signal_handler_connect(sh, "stop", onOutputStop, nullptr);
+		rt.watched = obs_output_get_weak_output(out);
+	}
+	obs_output_release(out);
+}
+
+QString lastOutputError()
+{
+	QString e;
+	if (obs_output_t *out = obs_frontend_get_streaming_output()) {
+		e = str(obs_output_get_last_error(out));
+		obs_output_release(out);
+	}
+	return e;
+}
+
+void noteStop(int code, bool started)
+{
+	rt.stopAt = now();
+	rt.stopCode = code;
+	rt.stopError = lastOutputError();
+	rt.stopStarted = started;
+}
+
+// The host in "rtmp://host:1935/live".
+QString hostOf(QString server)
+{
+	return QUrl(server.replace("rtmps://", "http://").replace("rtmp://", "http://")).host();
+}
+
+// "Twitch", or the host a custom server points at.
+QString serviceLabel(obs_data_t *settings)
+{
+	const QString name = str(obs_data_get_string(settings, "service"));
+	if (!name.isEmpty())
+		return name;
+	const QString host = hostOf(str(obs_data_get_string(settings, "server")));
+	return host.isEmpty() ? QString("your old stream setting") : host;
+}
+
+void loadPrevious()
+{
+	rt.previousLoaded = true;
+	rt.previous.clear();
+	const QByteArray file = configFile("previous-service.json").toUtf8();
+	if (obs_data_t *d = obs_data_create_from_json_file_safe(file.constData(), "bak")) {
+		if (obs_data_t *s = obs_data_get_obj(d, "settings")) {
+			rt.previous = serviceLabel(s);
+			obs_data_release(s);
+		}
+		obs_data_release(d);
+	}
+}
+
+// For the uninstaller (installer/multistream-obs.nsi), which can't ask OBS:
+// the profile whose service.json the dock replaced, and the host it now
+// sends to (put back only while that's still there). UTF-16 with a BOM, so
+// Windows' INI reader keeps any letters in the folder's name.
+void writeRestoreIni(const QString &server)
+{
+	char *dir = obs_frontend_get_current_profile_path();
+	const QString profile = QDir::toNativeSeparators(str(dir));
+	bfree(dir);
+	const QString ini = "[service]\r\nprofile=" + profile + "\r\nhost=" + hostOf(server) + "\r\n";
+	QFile f(configFile("restore.ini"));
+	if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+		return;
+	f.write("\xFF\xFE", 2);
+	f.write(reinterpret_cast<const char *>(ini.utf16()), ini.size() * 2);
+}
+
 } // namespace
 
 void obsstate::onEvent(int event)
@@ -65,9 +200,24 @@ void obsstate::onEvent(int event)
 	case OBS_FRONTEND_EVENT_STREAMING_STARTING:
 		rt.starting = true;
 		rt.stopping = false;
+		rt.reached = false;
+		outCode = 0;
+		outStarting = false;
+		watchOutput();
+		// OBS starts the output right after this event. When that fails at
+		// once (an encoder that won't open), OBS shows its own message and
+		// sends no further event: "starting" would stay on for good.
+		QTimer::singleShot(0, []() {
+			if (rt.starting && !outStarting && !obs_frontend_streaming_active()) {
+				rt.starting = false;
+				noteStop(-4, false);
+			}
+		});
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		rt.starting = false;
+		rt.reached = true;
+		rt.stopAt = 0;
 		rt.startedAt = now();
 		rt.lastBytes = 0;
 		rt.lastAt = 0;
@@ -77,10 +227,16 @@ void obsstate::onEvent(int event)
 		rt.stopping = true;
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+		// A code other than 0 (OBS_OUTPUT_SUCCESS): refused, or lost for good.
+		if (outCode != 0)
+			noteStop(int(outCode), rt.reached);
 		rt.starting = false;
 		rt.stopping = false;
 		rt.stoppedAt = now();
 		rt.kbps = 0;
+		break;
+	case OBS_FRONTEND_EVENT_EXIT:
+		unwatch();
 		break;
 	default:
 		break;
@@ -128,6 +284,18 @@ QJsonObject obsstate::snapshot()
 		o["lastError"] = str(obs_output_get_last_error(out));
 		obs_output_release(out);
 	}
+	if (rt.stopAt) {
+		QJsonObject ls;
+		ls["at"] = double(rt.stopAt);
+		ls["code"] = rt.stopCode;
+		ls["error"] = rt.stopError;
+		ls["started"] = rt.stopStarted;
+		o["lastStop"] = ls;
+	}
+	if (!rt.previousLoaded)
+		loadPrevious();
+	if (!rt.previous.isEmpty())
+		o["previous"] = rt.previous;
 
 	if (obs_service_t *svc = obs_frontend_get_streaming_service()) {
 		obs_data_t *s = obs_service_get_settings(svc);
@@ -235,6 +403,8 @@ bool obsstate::setService(const QString &server, const QString &key, QString &er
 			obs_data_save_json_safe(keep, file, "tmp", "bak");
 			bfree(file);
 			obs_data_release(keep);
+			writeRestoreIni(server);
+			rt.previousLoaded = false;
 		}
 		obs_data_release(os);
 	}
@@ -285,4 +455,37 @@ bool obsstate::setEncoder(int bitrate, int keyintSec, QString &error)
 	if (!ok)
 		error = "OBS's encoder settings couldn't be saved.";
 	return ok;
+}
+
+bool obsstate::restoreService(QString &error)
+{
+	if (obs_frontend_streaming_active()) {
+		error = "End the stream first.";
+		return false;
+	}
+	const QString path = configFile("previous-service.json");
+	const QByteArray file = path.toUtf8();
+	obs_data_t *d = obs_data_create_from_json_file_safe(file.constData(), "bak");
+	if (!d) {
+		error = "There's no earlier stream setting to put back.";
+		return false;
+	}
+	obs_data_t *s = obs_data_get_obj(d, "settings");
+	const QByteArray type(obs_data_get_string(d, "type"));
+	obs_service_t *svc = s && !type.isEmpty() ? obs_service_create(type.constData(), "default_service", s, nullptr) : nullptr;
+	if (s)
+		obs_data_release(s);
+	obs_data_release(d);
+	if (!svc) {
+		error = "OBS couldn't bring back the earlier stream setting. Set it in OBS: Settings, Stream.";
+		return false;
+	}
+	obs_frontend_set_streaming_service(svc);
+	obs_frontend_save_streaming_service();
+	obs_service_release(svc);
+	QFile::remove(path);
+	QFile::remove(path + ".bak");
+	QFile::remove(configFile("restore.ini"));
+	rt.previousLoaded = false;
+	return true;
 }

@@ -20,6 +20,10 @@ void onEvent(int event);
 // service it replaces is kept in the plugin's config (previous-service.json).
 bool setService(const QString &server, const QString &key, QString &error);
 
+// Puts back the service setService replaced (previous-service.json), then
+// forgets it.
+bool restoreService(QString &error);
+
 // The stream encoder's bitrate (kbps) and keyframe interval (seconds); 0
 // leaves one as it is. Simple output mode always sends a keyframe every 2 s.
 bool setEncoder(int bitrate, int keyintSec, QString &error);

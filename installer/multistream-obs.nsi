@@ -27,7 +27,7 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "GPL-2.0-or-later"
 
 !define MUI_WELCOMEPAGE_TITLE "Multistream for OBS ${VERSION}"
-!define MUI_WELCOMEPAGE_TEXT "This adds the Multistream dock to OBS: it checks everything before you go live, then goes live on all your platforms with one button.$\r$\n$\r$\nClose OBS before you go on. Next time you open OBS, the Multistream dock is there."
+!define MUI_WELCOMEPAGE_TEXT "This adds the Multistream dock to OBS: it checks everything before you go live, then goes live on all your platforms with one button.$\r$\n$\r$\nOn the Free plan, keep the Multistream app open on this PC while you stream. Pro needs only OBS.$\r$\n$\r$\nClose OBS before you go on. Next time you open OBS, the Multistream dock is there."
 !define MUI_FINISHPAGE_TITLE "Multistream is in OBS"
 !define MUI_FINISHPAGE_TEXT "Open OBS: the Multistream dock and the Vertical Scenes, Sources, Preview and Mixer docks show up on their own. Closed one? It's under Docks.$\r$\n$\r$\nUsed the Multistream Twitch tool or Vertical tool scripts before? The dock tells you if one needs removing."
 !insertmacro MUI_PAGE_WELCOME
@@ -75,6 +75,46 @@ Function un.onInit
   SetShellVarContext all
 FunctionEnd
 
+; Puts back the stream setting the dock replaced ("Point OBS at Multistream"
+; kept it in previous-service.json), but only while that OBS profile still
+; sends to Multistream: one changed by hand since stays as it is. The
+; plugin's restore.ini names the profile folder and the host it sends to.
+Var Cfg
+Var ObsProfile
+Var Host
+Var Found
+Function un.PutBackService
+  ReadINIStr $ObsProfile "$Cfg\restore.ini" "service" "profile"
+  ReadINIStr $Host "$Cfg\restore.ini" "service" "host"
+  StrCmp $ObsProfile "" done
+  StrCmp $Host "" done
+  IfFileExists "$Cfg\previous-service.json" 0 done
+  IfFileExists "$ObsProfile\service.json" 0 done
+  StrCpy $Found ""
+  StrLen $R3 $Host
+  ClearErrors
+  FileOpen $R0 "$ObsProfile\service.json" r
+  IfErrors done
+  nextline:
+    ClearErrors
+    FileRead $R0 $R1
+    IfErrors closed
+    StrCpy $R4 0
+    scan:
+      StrCpy $R2 $R1 $R3 $R4
+      StrCmp $R2 "" nextline
+      StrCmp $R2 $Host 0 +3
+        StrCpy $Found "1"
+        Goto closed
+      IntOp $R4 $R4 + 1
+      Goto scan
+  closed:
+  FileClose $R0
+  StrCmp $Found "1" 0 done
+  CopyFiles /SILENT "$Cfg\previous-service.json" "$ObsProfile\service.json"
+  done:
+FunctionEnd
+
 Section "Multistream for OBS"
   !insertmacro WAIT_FOR_OBS
   SetOutPath "$INSTDIR\bin\64bit"
@@ -107,4 +147,16 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "${UNINST_KEY}"
+  ; This user's OBS settings (not every user's): the stream setting back,
+  ; and the sign-in forgotten. Vertical scenes and the rest stay, for a
+  ; reinstall.
+  SetShellVarContext current
+  StrCpy $Cfg "$APPDATA\obs-studio\plugin_config\multistream"
+  Call un.PutBackService
+  Delete "$Cfg\previous-service.json"
+  Delete "$Cfg\previous-service.json.bak"
+  Delete "$Cfg\restore.ini"
+  Delete "$Cfg\account.json"
+  Delete "$Cfg\account.json.bak"
+  SetShellVarContext all
 SectionEnd

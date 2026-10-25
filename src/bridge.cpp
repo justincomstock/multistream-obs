@@ -451,6 +451,11 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 			replyJson(s, 200, okJson());
 		else
 			replyJson(s, 409, errorJson(error));
+	} else if (p == "service/restore") {
+		if (obsstate::restoreService(error))
+			replyJson(s, 200, okJson());
+		else
+			replyJson(s, 409, errorJson(error));
 	} else if (p == "encoder") {
 		if (obsstate::setEncoder(in.value("bitrate").toInt(), in.value("keyintSec").toInt(), error))
 			replyJson(s, 200, okJson());
