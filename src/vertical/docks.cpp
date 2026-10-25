@@ -64,6 +64,7 @@ QPointer<QToolButton> recButton;
 QPointer<QToolButton> replayButton;
 QPointer<QToolButton> saveButton;
 QPointer<QLabel> recLabel;
+QString shownRecError; // the recording problem last told about
 QPointer<QWidget> importBox;
 QPointer<QLabel> importText;
 QPointer<QPushButton> importAitumButton;
@@ -708,7 +709,7 @@ void itemAction(const char *what)
 	const QString w = what;
 	bool ok = true;
 	if (w == "remove") {
-		if (QMessageBox::question(sourcesDock, "Remove source", "Remove it from this vertical scene? It stays in OBS.") !=
+		if (QMessageBox::question(sourcesDock, "Remove source", "Remove it from this vertical scene? It stays in OBS.\n\nEdit \u2192 Undo puts it back.") !=
 		    QMessageBox::Yes)
 			return;
 		ok = canvas->removeItem(scene, id, error);
@@ -923,8 +924,12 @@ void refreshMixer(bool force)
 			fader->setCursor(own ? Qt::PointingHandCursor : Qt::ArrowCursor);
 			fader->setToolTip((own ? "Vertical volume: " : "Follows OBS's own fader (turn off MAIN): ") +
 					  faderText(fader->value()));
-			QObject::connect(fader, &QSlider::valueChanged, fader, [fader](int value) {
+			QObject::connect(fader, &QSlider::valueChanged, fader, [fader, uuid](int value) {
 				fader->setToolTip("Vertical volume: " + faderText(value));
+				// A click on the groove, the wheel or the arrow keys: applied now.
+				// A drag is applied on release (applying it rebuilds the strip).
+				if (!fader->isSliderDown())
+					setAudio(uuid, {{"volume", double(faderToMul(value))}});
 			});
 			QObject::connect(fader, &QSlider::sliderReleased, fader, [fader, uuid]() {
 				setAudio(uuid, {{"volume", double(faderToMul(fader->value()))}});
@@ -1060,8 +1065,10 @@ QWidget *makePreviewDock()
 		QString error;
 		if (!on)
 			canvas->recorder->stopRecording();
-		else if (!canvas->recorder->startRecording(error))
+		else if (!canvas->recorder->startRecording(error)) {
+			shownRecError = error;
 			warn(error);
+		}
 	});
 	replayButton = toolButton("Replay", QString(), "ghost");
 	replayButton->setCheckable(true);
@@ -1069,8 +1076,10 @@ QWidget *makePreviewDock()
 		QString error;
 		if (!on)
 			canvas->recorder->stopReplay();
-		else if (!canvas->recorder->startReplay(error))
+		else if (!canvas->recorder->startReplay(error)) {
+			shownRecError = error;
 			warn(error);
+		}
 	});
 	saveButton = toolButton("Save clip", "Save a clip of the last seconds of the vertical picture", "ghost");
 	QObject::connect(saveButton, &QToolButton::clicked, saveButton, []() {
@@ -1171,8 +1180,19 @@ void refreshRecord()
 				     : "Start the vertical replay buffer");
 	saveButton->setEnabled(rep);
 	const QString err = st.value("error").toString();
-	recLabel->setText(err.isEmpty() ? QString() : "\u26a0");
+	recLabel->setText(err.isEmpty() || rec || rep ? QString() : "\u26a0 Not recording");
 	recLabel->setToolTip(err);
+	if (err.isEmpty())
+		shownRecError.clear();
+	else if (err != shownRecError) {
+		// Started from OBS's own Record button: say so, or it looks like it worked.
+		shownRecError = err;
+		auto *box = new QMessageBox(QMessageBox::Warning, "Multistream Vertical",
+					    "Multistream Vertical couldn't record.\n\n" + err, QMessageBox::Ok, scenesDock);
+		box->setAttribute(Qt::WA_DeleteOnClose);
+		box->setModal(false);
+		box->show();
+	}
 }
 
 // The pill over the preview: is the vertical stream going to Multistream?
@@ -1227,8 +1247,14 @@ void refresh(bool force = false)
 		if (preview)
 			preview->sync();
 		if (sceneLabel) {
-			sceneLabel->setText(canvas->ready() ? canvas->currentScene() : QString("The vertical canvas is starting…"));
-			sceneLabel->setToolTip(canvas->ready() ? "Showing: " + canvas->currentScene() : QString());
+			sceneLabel->setText(canvas->ready()             ? canvas->currentScene()
+					    : canvas->waitsForOutputs() ? QString("Starts when you stop streaming and recording")
+									: QString("The vertical canvas is starting…"));
+			sceneLabel->setToolTip(canvas->ready() ? "Showing: " + canvas->currentScene()
+					       : canvas->waitsForOutputs()
+						       ? QString("OBS can't add the vertical picture while it's streaming or recording.\n"
+								 "It appears by itself once both are stopped.")
+						       : QString());
 			sizeLabel->setText(canvas->ready() ? QString("%1×%2").arg(canvas->width()).arg(canvas->height())
 							   : QString());
 		}
@@ -1365,6 +1391,7 @@ void close()
 			*t = nullptr;
 		}
 	}
+	PreviewWidget::closeProjectors();
 }
 
 QJsonObject report()

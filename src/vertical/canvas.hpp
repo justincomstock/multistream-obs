@@ -37,6 +37,8 @@ public:
 	void onFrontendEvent(int event);
 
 	bool ready() const { return canvas_ && obs_canvas_has_video(canvas_); }
+	// Not ready because OBS was streaming or recording when it had to start.
+	bool waitsForOutputs() const { return videoWaits_ && !ready(); }
 	video_t *video() const { return ready() ? obs_canvas_get_video(canvas_) : nullptr; }
 	audio_t *audio() const { return audio_.audio(); }
 	// Changes when the picture's size does.
@@ -153,6 +155,7 @@ private:
 	int height_ = 1920;
 	bool followMain_ = true;
 	quint64 version_ = 1;
+	bool videoWaits_ = false;
 	// vertical.json: {width, height, followMain,
 	//   collections: {name: {scene, order: [{uuid}], links: [{main, vertical}], audio}}}
 	obs_data_t *config_ = nullptr;

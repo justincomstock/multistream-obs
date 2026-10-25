@@ -53,6 +53,22 @@ VIAddVersionKey "LegalCopyright" "GPL-2.0-or-later"
 Function .onInit
   SetShellVarContext all
   StrCpy $INSTDIR "$APPDATA\obs-studio\plugins\multistream"
+  ; The plugin uses OBS 31.1's canvases: an older OBS wouldn't load it at all
+  ; (no dock, no message). Silent runs stop with exit code 3.
+  ReadRegStr $R0 HKLM "SOFTWARE\OBS Studio" ""
+  StrCmp $R0 "" obsok
+  ClearErrors
+  GetDLLVersion "$R0\bin\64bit\obs64.exe" $R1 $R2
+  IfErrors obsok
+  IntOp $R3 $R1 >> 16
+  IntOp $R4 $R1 & 0xFFFF
+  IntCmp $R3 31 0 obsold obsok
+  IntCmp $R4 1 obsok obsold obsok
+  obsold:
+  MessageBox MB_OK|MB_ICONEXCLAMATION "Multistream needs OBS 31.1 or newer, and this computer has OBS $R3.$R4.$\r$\n$\r$\nUpdate OBS (in OBS: Help, then Check for Updates, or get it from obsproject.com), then run this installer again." /SD IDOK
+  SetErrorLevel 3
+  Quit
+  obsok:
 FunctionEnd
 
 Function un.onInit

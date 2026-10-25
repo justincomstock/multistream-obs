@@ -11,6 +11,8 @@
 #include <graphics/vec4.h>
 
 #include <QContextMenuEvent>
+#include <QFocusEvent>
+#include <QPointer>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QTimer>
@@ -49,11 +51,114 @@ Rect boxOf(obs_sceneitem_t *item)
 	return {std::min(a.x, b.x), std::min(a.y, b.y), std::fabs(b.x - a.x), std::fabs(b.y - a.y)};
 }
 
-// Where an item's position sits on its box, for its alignment.
-void alignOffset(uint32_t align, float w, float h, float &x, float &y)
+// What the item actually shows on the canvas (unrotated items). A "fit" item's box is
+// its bounds, which can be much bigger than the picture inside it.
+Rect visibleOf(obs_sceneitem_t *item)
 {
-	x = (align & OBS_ALIGN_LEFT) ? 0.0f : (align & OBS_ALIGN_RIGHT) ? w : w / 2.0f;
-	y = (align & OBS_ALIGN_TOP) ? 0.0f : (align & OBS_ALIGN_BOTTOM) ? h : h / 2.0f;
+	const Rect box = boxOf(item);
+	if (obs_sceneitem_get_bounds_type(item) == OBS_BOUNDS_NONE)
+		return box;
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	struct obs_sceneitem_crop crop;
+	obs_sceneitem_get_crop(item, &crop);
+	const float cw = float(int(obs_source_get_width(src)) - crop.left - crop.right);
+	const float ch = float(int(obs_source_get_height(src)) - crop.top - crop.bottom);
+	if (cw <= 0.0f || ch <= 0.0f)
+		return box;
+	struct matrix4 m;
+	obs_sceneitem_get_draw_transform(item, &m);
+	struct vec3 a, b;
+	vec3_set(&a, 0.0f, 0.0f, 0.0f);
+	vec3_set(&b, cw, ch, 0.0f);
+	vec3_transform(&a, &a, &m);
+	vec3_transform(&b, &b, &m);
+	Rect r{std::min(a.x, b.x), std::min(a.y, b.y), std::fabs(b.x - a.x), std::fabs(b.y - a.y)};
+	struct obs_transform_info t;
+	obs_sceneitem_get_info2(item, &t);
+	if (t.crop_to_bounds) {
+		const float x0 = std::max(r.x, box.x), y0 = std::max(r.y, box.y);
+		const float x1 = std::min(r.x + r.w, box.x + box.w), y1 = std::min(r.y + r.h, box.y + box.h);
+		r = {x0, y0, std::max(x1 - x0, 0.0f), std::max(y1 - y0, 0.0f)};
+	}
+	return r.w > 0.0f && r.h > 0.0f ? r : box;
+}
+
+// Whether a canvas point is on the item's picture (what a click there grabs).
+bool hits(obs_sceneitem_t *item, const QPointF &p)
+{
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (!obs_sceneitem_visible(item) || obs_sceneitem_locked(item) ||
+	    !(obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO))
+		return false;
+	if (obs_sceneitem_get_rot(item) == 0.0f) {
+		// Only what's visible: a "fit" item's empty bounds don't catch clicks.
+		const Rect r = visibleOf(item);
+		return p.x() >= r.x && p.x() <= r.x + r.w && p.y() >= r.y && p.y() <= r.y + r.h;
+	}
+	struct matrix4 m, inv;
+	obs_sceneitem_get_box_transform(item, &m);
+	matrix4_inv(&inv, &m);
+	struct vec3 v;
+	vec3_set(&v, float(p.x()), float(p.y()), 0.0f);
+	vec3_transform(&v, &v, &inv);
+	return v.x >= 0.0f && v.x <= 1.0f && v.y >= 0.0f && v.y <= 1.0f;
+}
+
+// The item with this id, with a reference taken under the scene's lock, so the
+// render thread can't race a removal on the UI thread. Release it after.
+obs_sceneitem_t *itemRef(obs_scene_t *scene, qint64 id)
+{
+	struct Find {
+		qint64 id;
+		obs_sceneitem_t *item;
+	} f{id, nullptr};
+	if (!scene || !id)
+		return nullptr;
+	obs_scene_enum_items(
+		scene,
+		[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+			auto *f = static_cast<Find *>(param);
+			if (obs_sceneitem_get_id(item) != f->id)
+				return true;
+			obs_sceneitem_addref(item);
+			f->item = item;
+			return false;
+		},
+		&f);
+	return f.item;
+}
+
+// Sets the transform, then shifts it so its picture's top-left lands on (left, top).
+// Works for any alignment and for flipped items (OBS updates the box right away).
+void setAt(obs_sceneitem_t *item, struct obs_transform_info &t, float left, float top)
+{
+	obs_sceneitem_set_info2(item, &t);
+	const Rect r = visibleOf(item);
+	t.pos.x += left - r.x;
+	t.pos.y += top - r.y;
+	obs_sceneitem_set_info2(item, &t);
+}
+
+// A "fit" or "fill" item without trimming becomes a plain scaled item showing the
+// same picture, so handles and crops act on what's visible.
+void bakeBounds(obs_sceneitem_t *item)
+{
+	struct obs_transform_info t;
+	obs_sceneitem_get_info2(item, &t);
+	if (t.bounds_type == OBS_BOUNDS_NONE || t.crop_to_bounds)
+		return;
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	struct obs_sceneitem_crop crop;
+	obs_sceneitem_get_crop(item, &crop);
+	const float cw = float(int(obs_source_get_width(src)) - crop.left - crop.right);
+	const float ch = float(int(obs_source_get_height(src)) - crop.top - crop.bottom);
+	if (cw <= 0.0f || ch <= 0.0f)
+		return;
+	const Rect v = visibleOf(item);
+	t.bounds_type = OBS_BOUNDS_NONE;
+	t.scale.x = std::copysign(v.w / cw, t.scale.x);
+	t.scale.y = std::copysign(v.h / ch, t.scale.y);
+	setAt(item, t, v.x, v.y);
 }
 
 // A filled rectangle in the current units (fractions allowed).
@@ -124,15 +229,50 @@ void PreviewWidget::sync()
 	}
 	canvasW_.store(uint32_t(std::max(canvas_->width(), 1)));
 	canvasH_.store(uint32_t(std::max(canvas_->height(), 1)));
+	// Item ids are per scene: another scene's item 3 isn't the one that was selected,
+	// and a drag can't carry over into it.
+	const QString shown = canvas_->currentScene();
+	if (shown != shownScene_) {
+		shownScene_ = shown;
+		selected_.store(0);
+		drag_ = Drag::None;
+		undoBefore_.clear();
+		if (onSelect)
+			onSelect(0);
+	}
 	if (s && selected_.load() && !obs_scene_find_sceneitem_by_id(s, selected_.load()))
 		selected_.store(0);
 	obs_scene_release(s);
 	obs_canvas_release(c);
 }
 
+namespace {
+QList<QPointer<PreviewWidget>> projectors;
+}
+
+void PreviewWidget::closeProjectors()
+{
+	for (const QPointer<PreviewWidget> &p : projectors)
+		if (p)
+			delete p.data();
+	projectors.clear();
+}
+
+void PreviewWidget::focusOutEvent(QFocusEvent *e)
+{
+	// Space released while focus was elsewhere never arrives here.
+	space_ = false;
+	if (drag_ == Drag::Pan)
+		drag_ = Drag::None;
+	if (!projector_.load())
+		setCursor(Qt::ArrowCursor);
+	QWidget::focusOutEvent(e);
+}
+
 void PreviewWidget::openProjector(VerticalCanvas *canvas)
 {
 	auto *p = new PreviewWidget(canvas);
+	projectors.append(p);
 	p->projector_.store(true);
 	p->setAttribute(Qt::WA_DeleteOnClose);
 	p->setWindowTitle("Vertical projector");
@@ -300,26 +440,30 @@ void PreviewWidget::draw(void *param, uint32_t cx, uint32_t cy)
 			}
 			// The selected item, with its corner handles.
 			obs_scene_t *scene = sceneSrc ? obs_scene_from_source(sceneSrc) : nullptr;
-			obs_sceneitem_t *item = scene && self->selected_.load()
-							? obs_scene_find_sceneitem_by_id(scene, self->selected_.load())
-							: nullptr;
+			obs_sceneitem_t *item = itemRef(scene, self->selected_.load());
 			if (item) {
-				obs_sceneitem_addref(item);
-				struct matrix4 m;
-				obs_sceneitem_get_box_transform(item, &m);
 				setColor(solid, 0xff7c6cff);
-				gs_matrix_push();
-				gs_matrix_mul(&m);
-				// The box is the unit square here: its outline, 2 px wide.
-				const float sx = std::max(std::sqrt(m.x.x * m.x.x + m.x.y * m.x.y), 0.0001f);
-				const float sy = std::max(std::sqrt(m.y.x * m.y.x + m.y.y * m.y.y), 0.0001f);
-				drawRect(0, 0, 1, 2 * px / sy);
-				drawRect(0, 1 - 2 * px / sy, 1, 2 * px / sy);
-				drawRect(0, 0, 2 * px / sx, 1);
-				drawRect(1 - 2 * px / sx, 0, 2 * px / sx, 1);
-				gs_matrix_pop();
-				if (obs_sceneitem_get_rot(item) == 0.0f && !obs_sceneitem_locked(item)) {
-					const Rect b = boxOf(item);
+				const bool rotated = obs_sceneitem_get_rot(item) != 0.0f;
+				if (rotated) {
+					struct matrix4 m;
+					obs_sceneitem_get_box_transform(item, &m);
+					gs_matrix_push();
+					gs_matrix_mul(&m);
+					// The box is the unit square here: its outline, 2 px wide.
+					const float sx = std::max(std::sqrt(m.x.x * m.x.x + m.x.y * m.x.y), 0.0001f);
+					const float sy = std::max(std::sqrt(m.y.x * m.y.x + m.y.y * m.y.y), 0.0001f);
+					drawRect(0, 0, 1, 2 * px / sy);
+					drawRect(0, 1 - 2 * px / sy, 1, 2 * px / sy);
+					drawRect(0, 0, 2 * px / sx, 1);
+					drawRect(1 - 2 * px / sx, 0, 2 * px / sx, 1);
+					gs_matrix_pop();
+				} else {
+					// Around what's visible, not a "fit" item's whole bounds.
+					const Rect v = visibleOf(item);
+					drawOutline(v.x, v.y, v.w, v.h, 2 * px);
+				}
+				if (!rotated && !obs_sceneitem_locked(item)) {
+					const Rect b = visibleOf(item);
 					const float h = HANDLE_PX * px;
 					const float hx[4] = {b.x, b.x + b.w, b.x + b.w, b.x};
 					const float hy[4] = {b.y, b.y, b.y + b.h, b.y + b.h};
@@ -348,17 +492,7 @@ obs_sceneitem_t *PreviewWidget::itemAt(obs_scene_t *scene, const QPointF &p) con
 		scene,
 		[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
 			auto *h = static_cast<Hit *>(param);
-			obs_source_t *src = obs_sceneitem_get_source(item);
-			if (!obs_sceneitem_visible(item) || obs_sceneitem_locked(item) ||
-			    !(obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO))
-				return true;
-			struct matrix4 m, inv;
-			obs_sceneitem_get_box_transform(item, &m);
-			matrix4_inv(&inv, &m);
-			struct vec3 v;
-			vec3_set(&v, float(h->p.x()), float(h->p.y()), 0.0f);
-			vec3_transform(&v, &v, &inv);
-			if (v.x >= 0.0f && v.x <= 1.0f && v.y >= 0.0f && v.y <= 1.0f)
+			if (hits(item, h->p))
 				h->item = item; // later = higher: the top one wins
 			return true;
 		},
@@ -373,7 +507,7 @@ int PreviewWidget::cornerAt(obs_scene_t *scene, const QPointF &p) const
 		return -1;
 	const qreal dpr = devicePixelRatioF();
 	const float reach = HANDLE_PX / view(uint32_t(width() * dpr), uint32_t(height() * dpr)).scale;
-	const Rect b = boxOf(item);
+	const Rect b = visibleOf(item);
 	const QPointF corners[4] = {{b.x, b.y}, {b.x + b.w, b.y}, {b.x + b.w, b.y + b.h}, {b.x, b.y + b.h}};
 	for (int i = 0; i < 4; i++)
 		if (std::fabs(p.x() - corners[i].x()) <= reach && std::fabs(p.y() - corners[i].y()) <= reach)
@@ -427,21 +561,31 @@ void PreviewWidget::mousePressEvent(QMouseEvent *e)
 	obs_scene_t *s = sceneRef();
 	if (!s)
 		return;
+	pressScene_ = canvas_->currentScene();
 	corner_ = cornerAt(s, pressCanvas_);
 	obs_sceneitem_t *item = nullptr;
 	if (corner_ >= 0) {
 		item = obs_scene_find_sceneitem_by_id(s, selected_.load());
-		const bool canCrop = obs_sceneitem_get_bounds_type(item) == OBS_BOUNDS_NONE;
-		drag_ = (e->modifiers() & Qt::AltModifier) && canCrop ? Drag::Crop : Drag::Resize;
+		drag_ = Drag::Resize;
 	} else {
-		item = itemAt(s, pressCanvas_);
+		// A click inside the selected item keeps it, as in OBS, so a source under a
+		// full-frame overlay can still be dragged once picked in the list.
+		obs_sceneitem_t *sel = obs_scene_find_sceneitem_by_id(s, selected_.load());
+		item = sel && hits(sel, pressCanvas_) ? sel : itemAt(s, pressCanvas_);
 		selected_.store(item ? obs_sceneitem_get_id(item) : 0);
 		if (onSelect)
 			onSelect(selected_.load());
 		drag_ = item ? Drag::Move : Drag::None;
 	}
 	if (item) {
-		const Rect b = boxOf(item);
+		beginUndo();
+		if (drag_ == Drag::Resize && obs_sceneitem_get_rot(item) == 0.0f) {
+			// Handles sit on the picture, so a "fit" item becomes plain scaled first.
+			bakeBounds(item);
+			if ((e->modifiers() & Qt::AltModifier) && obs_sceneitem_get_bounds_type(item) == OBS_BOUNDS_NONE)
+				drag_ = Drag::Crop;
+		}
+		const Rect b = obs_sceneitem_get_rot(item) == 0.0f ? visibleOf(item) : boxOf(item);
 		boxX_ = b.x;
 		boxY_ = b.y;
 		boxW_ = b.w;
@@ -451,7 +595,6 @@ void PreviewWidget::mousePressEvent(QMouseEvent *e)
 		obs_source_t *src = obs_sceneitem_get_source(item);
 		srcW_ = obs_source_get_width(src);
 		srcH_ = obs_source_get_height(src);
-		beginUndo();
 	}
 	obs_scene_release(s);
 }
@@ -469,6 +612,12 @@ void PreviewWidget::mouseMoveEvent(QMouseEvent *e)
 		const int c = s ? cornerAt(s, toCanvas(e->position())) : -1;
 		obs_scene_release(s);
 		setCursor(c == 0 || c == 2 ? Qt::SizeFDiagCursor : c == 1 || c == 3 ? Qt::SizeBDiagCursor : Qt::ArrowCursor);
+		return;
+	}
+	if (canvas_->currentScene() != pressScene_) {
+		// The scene on air changed mid-drag: its items aren't the ones grabbed.
+		drag_ = Drag::None;
+		undoBefore_.clear();
 		return;
 	}
 	obs_scene_t *s = sceneRef();
@@ -512,50 +661,43 @@ void PreviewWidget::mouseMoveEvent(QMouseEvent *e)
 		// The opposite corner stays put.
 		const bool right = corner_ == 1 || corner_ == 2, bottom = corner_ == 2 || corner_ == 3;
 		const float ax = right ? boxX_ : boxX_ + boxW_, ay = bottom ? boxY_ : boxY_ + boxH_;
-		float w = std::max(std::fabs(float(p.x()) - ax), 4.0f), h = std::max(std::fabs(float(p.y()) - ay), 4.0f);
+		// The pointer can't pass the opposite corner: the item never turns inside out.
+		float w = std::max(right ? float(p.x()) - ax : ax - float(p.x()), 4.0f);
+		float h = std::max(bottom ? float(p.y()) - ay : ay - float(p.y()), 4.0f);
 		if (!noSnap) {
 			const float k = std::max(w / boxW_, h / boxH_);
 			w = boxW_ * k;
 			h = boxH_ * k;
 		}
-		const float left = right ? ax : ax - w, top = bottom ? ay : ay - h;
 		if (t.bounds_type != OBS_BOUNDS_NONE) {
+			// Trimmed to its box ("Fill"): the box is what's visible.
 			t.bounds.x = w / std::max(std::fabs(t.scale.x), 0.0001f);
 			t.bounds.y = h / std::max(std::fabs(t.scale.y), 0.0001f);
 		} else {
-			t.scale.x = startInfo_.scale.x * (w / boxW_);
+			t.scale.x = startInfo_.scale.x * (w / boxW_); // keeps a flip's sign
 			t.scale.y = startInfo_.scale.y * (h / boxH_);
 		}
-		float offX, offY;
-		alignOffset(t.alignment, w, h, offX, offY);
-		t.pos.x = left + offX;
-		t.pos.y = top + offY;
-		obs_sceneitem_set_info2(item, &t);
+		setAt(item, t, right ? ax : ax - w, bottom ? ay : ay - h);
 	} else if (drag_ == Drag::Crop && srcW_ && srcH_) {
 		const float sx = std::max(std::fabs(startInfo_.scale.x), 0.0001f);
 		const float sy = std::max(std::fabs(startInfo_.scale.y), 0.0001f);
 		const float dx = float(p.x() - pressCanvas_.x()), dy = float(p.y() - pressCanvas_.y());
-		struct obs_sceneitem_crop c = startCrop_;
 		const bool right = corner_ == 1 || corner_ == 2, bottom = corner_ == 2 || corner_ == 3;
-		const int maxW = int(srcW_) - 4, maxH = int(srcH_) - 4;
-		if (right)
-			c.right = std::clamp(int(std::lround(startCrop_.right - dx / sx)), 0, maxW - c.left);
-		else
-			c.left = std::clamp(int(std::lround(startCrop_.left + dx / sx)), 0, maxW - c.right);
-		if (bottom)
-			c.bottom = std::clamp(int(std::lround(startCrop_.bottom - dy / sy)), 0, maxH - c.top);
-		else
-			c.top = std::clamp(int(std::lround(startCrop_.top + dy / sy)), 0, maxH - c.bottom);
+		// The screen edge being dragged, as a crop side: a flipped item's screen
+		// left is its picture's right.
+		const bool flipX = startInfo_.scale.x < 0, flipY = startInfo_.scale.y < 0;
+		struct obs_sceneitem_crop c = startCrop_;
+		int &cx = (right != flipX) ? c.right : c.left, &cxOther = (right != flipX) ? c.left : c.right;
+		int &cy = (bottom != flipY) ? c.bottom : c.top, &cyOther = (bottom != flipY) ? c.top : c.bottom;
+		const int startX = cx, startY = cy;
+		const float growX = right ? -dx : dx, growY = bottom ? -dy : dy; // more crop
+		cx = std::clamp(int(std::lround(startX + growX / sx)), 0, std::max(0, int(srcW_) - 4 - cxOther));
+		cy = std::clamp(int(std::lround(startY + growY / sy)), 0, std::max(0, int(srcH_) - 4 - cyOther));
 		obs_sceneitem_set_crop(item, &c);
-		// The uncropped edges stay where they were.
-		const float left = boxX_ + float(c.left - startCrop_.left) * sx;
-		const float top = boxY_ + float(c.top - startCrop_.top) * sy;
-		const float w = float(int(srcW_) - c.left - c.right) * sx, h = float(int(srcH_) - c.top - c.bottom) * sy;
-		float offX, offY;
-		alignOffset(t.alignment, w, h, offX, offY);
-		t.pos.x = left + offX;
-		t.pos.y = top + offY;
-		obs_sceneitem_set_info2(item, &t);
+		// The edges not being cropped stay where they were.
+		const float left = right ? boxX_ : boxX_ + float(cx - startX) * sx;
+		const float top = bottom ? boxY_ : boxY_ + float(cy - startY) * sy;
+		setAt(item, t, left, top);
 	}
 	obs_scene_release(s);
 }
@@ -607,6 +749,57 @@ void PreviewWidget::nudge(float dx, float dy)
 	obs_scene_release(s);
 }
 
+void PreviewWidget::rotateBy(qint64 id, float degrees)
+{
+	obs_scene_t *s = sceneRef();
+	obs_sceneitem_t *item = s ? obs_scene_find_sceneitem_by_id(s, id) : nullptr;
+	if (item) {
+		beginUndo();
+		// Turns about its centre, as OBS does, so it stays where it was.
+		auto centre = [item]() {
+			struct matrix4 m;
+			obs_sceneitem_get_box_transform(item, &m);
+			struct vec3 c;
+			vec3_set(&c, 0.5f, 0.5f, 0.0f);
+			vec3_transform(&c, &c, &m);
+			return c;
+		};
+		const struct vec3 before = centre();
+		struct obs_transform_info t;
+		obs_sceneitem_get_info2(item, &t);
+		t.rot = std::fmod(t.rot + degrees + 360.0f, 360.0f);
+		obs_sceneitem_set_info2(item, &t);
+		const struct vec3 after = centre();
+		t.pos.x += before.x - after.x;
+		t.pos.y += before.y - after.y;
+		obs_sceneitem_set_info2(item, &t);
+		endUndo("Rotate vertical source");
+	}
+	obs_scene_release(s);
+}
+
+void PreviewWidget::askRemove(qint64 id)
+{
+	obs_scene_t *s = sceneRef();
+	obs_sceneitem_t *item = s ? obs_scene_find_sceneitem_by_id(s, id) : nullptr;
+	const QString name = item ? QString::fromUtf8(obs_source_get_name(obs_sceneitem_get_source(item))) : QString();
+	obs_scene_release(s);
+	if (!item)
+		return;
+	if (QMessageBox::question(this, "Vertical Preview",
+				  "Remove \"" + name + "\" from this vertical scene?\n\nEdit → Undo puts it back.") !=
+	    QMessageBox::Yes)
+		return;
+	QString error;
+	if (!canvas_->removeItem(canvas_->currentScene(), id, error))
+		QMessageBox::warning(this, "Vertical Preview", error);
+	if (selected_.load() == id) {
+		selected_.store(0);
+		if (onSelect)
+			onSelect(0);
+	}
+}
+
 void PreviewWidget::keyPressEvent(QKeyEvent *e)
 {
 	if (projector_.load()) {
@@ -645,12 +838,7 @@ void PreviewWidget::keyPressEvent(QKeyEvent *e)
 		const qint64 id = selected_.load();
 		if (!id)
 			break;
-		if (QMessageBox::question(this, "Vertical Preview", "Remove the selected source from this vertical scene?") ==
-		    QMessageBox::Yes) {
-			QString error;
-			canvas_->removeItem(canvas_->currentScene(), id, error);
-			selected_.store(0);
-		}
+		askRemove(id);
 		return;
 	}
 	default:
@@ -708,40 +896,26 @@ void PreviewWidget::contextMenuEvent(QContextMenuEvent *e)
 		auto place = [this, scene, id, W, H](int boundsType) {
 			QString error;
 			beginUndo();
-			QJsonObject t{{"x", 0.0}, {"y", 0.0}, {"scaleX", 1.0}, {"scaleY", 1.0}, {"rot", 0.0},
+			// Flips and crops stay; "Fill" trims what spills past the frame.
+			const QJsonObject cur = canvas_->itemTransform(scene, id);
+			const double fx = cur.value("scaleX").toDouble() < 0 ? -1.0 : 1.0;
+			const double fy = cur.value("scaleY").toDouble() < 0 ? -1.0 : 1.0;
+			QJsonObject t{{"x", 0.0}, {"y", 0.0}, {"scaleX", fx}, {"scaleY", fy}, {"rot", 0.0},
 				      {"align", int(OBS_ALIGN_LEFT | OBS_ALIGN_TOP)}, {"boundsType", boundsType},
-				      {"boundsW", W}, {"boundsH", H}, {"cropLeft", 0}, {"cropTop", 0}, {"cropRight", 0},
-				      {"cropBottom", 0}};
+				      {"boundsW", W}, {"boundsH", H},
+				      {"cropToBounds", boundsType == int(OBS_BOUNDS_SCALE_OUTER)}};
 			canvas_->setItemTransform(scene, id, t, error);
-			endUndo("Fit vertical source");
+			endUndo(boundsType == int(OBS_BOUNDS_SCALE_OUTER) ? "Fill vertical frame" : "Fit vertical frame");
 		};
 		menu.addAction("Properties…", [src]() { obs_frontend_open_source_properties(src); });
 		menu.addAction("Filters…", [src]() { obs_frontend_open_source_filters(src); });
 		menu.addSeparator();
 		menu.addAction("Fill the frame", [place]() { place(int(OBS_BOUNDS_SCALE_OUTER)); });
 		menu.addAction("Fit in the frame", [place]() { place(int(OBS_BOUNDS_SCALE_INNER)); });
-		menu.addAction("Rotate 90° right", [this, scene, id]() {
-			QString error;
-			beginUndo();
-			const QJsonObject cur = canvas_->itemTransform(scene, id);
-			canvas_->setItemTransform(scene, id, {{"rot", std::fmod(cur.value("rot").toDouble() + 90.0, 360.0)}},
-						  error);
-			endUndo("Rotate vertical source");
-		});
-		menu.addAction("Rotate 90° left", [this, scene, id]() {
-			QString error;
-			beginUndo();
-			const QJsonObject cur = canvas_->itemTransform(scene, id);
-			canvas_->setItemTransform(scene, id,
-						  {{"rot", std::fmod(cur.value("rot").toDouble() + 270.0, 360.0)}}, error);
-			endUndo("Rotate vertical source");
-		});
+		menu.addAction("Rotate 90° right", [this, id]() { rotateBy(id, 90.0f); });
+		menu.addAction("Rotate 90° left", [this, id]() { rotateBy(id, -90.0f); });
 		menu.addSeparator();
-		menu.addAction("Remove from this scene", [this, scene, id]() {
-			QString error;
-			canvas_->removeItem(scene, id, error);
-			selected_.store(0);
-		});
+		menu.addAction("Remove from this scene", [this, id]() { askRemove(id); });
 		menu.addSeparator();
 	}
 	QAction *safe = menu.addAction("Show TikTok / Shorts safe areas", [this](bool on) { setSafeAreas(on); });

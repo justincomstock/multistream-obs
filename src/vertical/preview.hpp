@@ -40,9 +40,12 @@ public:
 	// A projector window of the vertical picture: no editing or guides,
 	// fullscreen on any screen (right-click), Esc leaves fullscreen.
 	static void openProjector(VerticalCanvas *canvas);
+	// At OBS's exit: projectors have no parent, so OBS wouldn't close them.
+	static void closeProjectors();
 
 protected:
 	void showEvent(QShowEvent *e) override;
+	void focusOutEvent(QFocusEvent *e) override;
 	void hideEvent(QHideEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
 	void paintEvent(QPaintEvent *e) override;
@@ -69,6 +72,8 @@ private:
 	void beginUndo();
 	void endUndo(const char *what);
 	void nudge(float dx, float dy);
+	void rotateBy(qint64 id, float degrees); // about the item's centre, as OBS does
+	void askRemove(qint64 id); // asks first; Edit -> Undo brings it back
 
 	void createDisplay();
 	void destroyDisplay();
@@ -98,6 +103,8 @@ private:
 	float startPanX_ = 0, startPanY_ = 0;
 	QString undoBefore_;
 	bool space_ = false;
+	QString shownScene_; // the scene sync() last saw on air (ids are per scene)
+	QString pressScene_; // the scene a drag started in
 	// at press: the item's box and transform
 	float boxX_ = 0, boxY_ = 0, boxW_ = 0, boxH_ = 0;
 	struct obs_transform_info startInfo_ = {};

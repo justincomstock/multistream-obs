@@ -185,8 +185,13 @@ void VerticalCanvas::resetVideo()
 	ovi.base_height = ovi.output_height = uint32_t(height_);
 	// Fails while any output is running (OBS can't resize mid-stream):
 	// tick() tries again.
-	if (!obs_canvas_reset_video(canvas_, &ovi))
+	const bool ok = obs_canvas_reset_video(canvas_, &ovi);
+	if (!ok && !videoWaits_)
 		obs_log(LOG_INFO, "vertical: canvas video waits until outputs stop");
+	if (ok == videoWaits_) {
+		videoWaits_ = !ok;
+		changed(); // the docks say why it's blank, then show it
+	}
 }
 
 void VerticalCanvas::attach()
@@ -834,11 +839,15 @@ bool VerticalCanvas::addSource(const QString &scene, const QString &source, QStr
 		obs_sceneitem_set_bounds_alignment(item, OBS_ALIGN_CENTER);
 		obs_sceneitem_set_alignment(item, OBS_ALIGN_CENTER);
 		obs_sceneitem_set_pos(item, &pos);
+		// Trimmed to the frame, so its handles sit on what you see.
+		obs_sceneitem_set_bounds_crop(item, true);
 	}
+	const bool isScene = obs_scene_from_source(src) != nullptr;
 	obs_source_release(src);
 	obs_scene_release(s);
 	if (!item) {
-		error = "OBS couldn't add the source (a scene can't contain itself).";
+		error = isScene ? "OBS couldn't add that scene here (a scene can't contain itself)."
+				: "OBS couldn't add \"" + source + "\" to this vertical scene.";
 		return false;
 	}
 	refreshAudio();
