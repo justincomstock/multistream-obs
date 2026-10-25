@@ -130,7 +130,7 @@ bool VerticalCanvas::setItemLocked(const QString &scene, qint64 id, bool on, QSt
 bool VerticalCanvas::moveItem(const QString &scene, qint64 id, int movement, QString &error)
 {
 	WITH_ITEM(scene, id, error)
-	obs_sceneitem_set_order(item, enum obs_order_movement(movement));
+	obs_sceneitem_set_order(item, static_cast<enum obs_order_movement>(movement));
 	obs_scene_release(s_);
 	return true;
 }
@@ -227,7 +227,7 @@ bool VerticalCanvas::setItemTransform(const QString &scene, qint64 id, const QJs
 	if (in.contains("align"))
 		t.alignment = uint32_t(in.value("align").toInt());
 	if (in.contains("boundsType"))
-		t.bounds_type = enum obs_bounds_type(in.value("boundsType").toInt());
+		t.bounds_type = static_cast<enum obs_bounds_type>(in.value("boundsType").toInt());
 	t.bounds.x = num("boundsW", t.bounds.x);
 	t.bounds.y = num("boundsH", t.bounds.y);
 	obs_sceneitem_set_info2(item, &t);

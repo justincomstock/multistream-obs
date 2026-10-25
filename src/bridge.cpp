@@ -1,5 +1,6 @@
 #include "bridge.hpp"
 
+#include "games.hpp"
 #include "http.hpp"
 #include "obs-state.hpp"
 #include "relay-output.hpp"
@@ -13,6 +14,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
@@ -422,6 +424,10 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		replyJson(s, 200, o);
 		return;
 	}
+	if (p == "games" && r.method == "GET") {
+		replyJson(s, 200, games::state());
+		return;
+	}
 	if (r.method != "POST") {
 		replyJson(s, 405, errorJson("Use POST."));
 		return;
@@ -479,6 +485,15 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		}
 		QDesktopServices::openUrl(QUrl(url));
 		replyJson(s, 200, okJson());
+	} else if (p == "games/follow") {
+		games::follow(in.value("exe").toString());
+		replyJson(s, 200, okJson());
+	} else if (p == "games/settings") {
+		QStringList names;
+		for (const QJsonValue &v : in.value("follow").toArray())
+			names.append(v.toString());
+		games::setFollowSources(names);
+		replyJson(s, 200, games::state());
 	} else if (p == "signout") {
 		saveToken("");
 		replyJson(s, 200, okJson());

@@ -23,6 +23,13 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Core Network)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
 if(OS_WINDOWS)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp advapi32)
+elseif(OS_MACOS)
+  # http.cpp: the system's libcurl (macOS SDK).
+  find_package(CURL REQUIRED)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE CURL::libcurl)
+  # games.cpp: the windows on screen and the app each belongs to.
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE "$<LINK_LIBRARY:FRAMEWORK,CoreGraphics.framework>"
+                                                      "$<LINK_LIBRARY:FRAMEWORK,CoreFoundation.framework>")
 endif()
 target_compile_options(
   ${CMAKE_PROJECT_NAME}
@@ -41,6 +48,7 @@ target_sources(
     src/plugin-main.cpp
     src/dock.cpp
     src/bridge.cpp
+    src/games.cpp
     src/http.cpp
     src/obs-state.cpp
     src/relay-output.cpp

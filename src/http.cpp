@@ -175,7 +175,140 @@ void HttpClient::send(const HttpRequestSpec &spec, QObject *context, std::functi
 	});
 }
 
-#else // Not Windows: Qt's network stack, which has TLS there.
+#elif defined(__APPLE__)
+// macOS: the system's libcurl (in the SDK, with the system's TLS), one
+// request per pool thread like WinHTTP above. OBS's Qt on macOS may come
+// without a TLS backend too, so Qt's network stack isn't relied on here.
+
+#include <QThreadPool>
+#include <QUrl>
+
+#include <atomic>
+
+#include <curl/curl.h>
+
+namespace {
+const qsizetype MAX_RESPONSE = 32 * 1024 * 1024;
+
+struct Reply {
+	QByteArray body;
+	bool tooBig = false;
+	const std::atomic<bool> *stopping = nullptr;
+};
+
+size_t onBody(char *data, size_t size, size_t n, void *user)
+{
+	auto *r = static_cast<Reply *>(user);
+	const size_t len = size * n;
+	if (r->body.size() + qsizetype(len) > MAX_RESPONSE) {
+		r->tooBig = true;
+		return 0; // stops the transfer
+	}
+	r->body.append(data, qsizetype(len));
+	return len;
+}
+
+// Called often while a request runs: a non-zero answer aborts it, so
+// shutting down never waits for a slow server.
+int onProgress(void *user, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+{
+	auto *r = static_cast<Reply *>(user);
+	return r->stopping && r->stopping->load() ? 1 : 0;
+}
+} // namespace
+
+struct HttpClient::Impl {
+	QByteArray agent;
+	QThreadPool pool;
+	std::atomic<bool> stopping{false};
+
+	HttpResult run(const HttpRequestSpec &spec);
+};
+
+HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
+{
+	HttpResult res;
+	const QUrl u(spec.url);
+	if (stopping || !u.isValid() || (u.scheme() != "https" && u.scheme() != "http"))
+		return res;
+	CURL *c = curl_easy_init();
+	if (!c)
+		return res;
+	const QByteArray url = u.toEncoded();
+	Reply reply;
+	reply.stopping = &stopping;
+	curl_slist *head = nullptr;
+	for (auto it = spec.headers.cbegin(); it != spec.headers.cend(); ++it)
+		head = curl_slist_append(head, QByteArray(it.key() + ": " + it.value()).constData());
+	// An empty Expect: no "100-continue" wait before a body.
+	head = curl_slist_append(head, "Expect:");
+
+	curl_easy_setopt(c, CURLOPT_URL, url.constData());
+	curl_easy_setopt(c, CURLOPT_USERAGENT, agent.constData());
+	curl_easy_setopt(c, CURLOPT_HTTPHEADER, head);
+	curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, spec.method.constData());
+	if (spec.method == "HEAD")
+		curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
+	if (!spec.body.isEmpty() || spec.method == "POST" || spec.method == "PUT" || spec.method == "PATCH") {
+		curl_easy_setopt(c, CURLOPT_POSTFIELDS, spec.body.constData());
+		curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, curl_off_t(spec.body.size()));
+	}
+	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, spec.followRedirects ? 1L : 0L);
+	curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
+	curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, long(spec.timeoutMs));
+	curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, long(spec.timeoutMs));
+	curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, ""); // whatever the server compresses with
+	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, onBody);
+	curl_easy_setopt(c, CURLOPT_WRITEDATA, &reply);
+	curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, onProgress);
+	curl_easy_setopt(c, CURLOPT_XFERINFODATA, &reply);
+	curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+	// No cookie engine: the account is the bearer token the bridge adds.
+
+	const CURLcode rc = curl_easy_perform(c);
+	if (rc == CURLE_OK && !reply.tooBig) {
+		long code = 0;
+		curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+		char *ct = nullptr;
+		curl_easy_getinfo(c, CURLINFO_CONTENT_TYPE, &ct);
+		res.status = int(code);
+		res.body = reply.body;
+		if (ct)
+			res.contentType = QByteArray(ct);
+	}
+	curl_slist_free_all(head);
+	curl_easy_cleanup(c);
+	return res;
+}
+
+HttpClient::HttpClient(const QByteArray &userAgent) : d_(new Impl)
+{
+	static const bool ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+	(void)ready;
+	d_->agent = userAgent;
+	d_->pool.setMaxThreadCount(8);
+}
+
+HttpClient::~HttpClient()
+{
+	d_->stopping = true;
+	d_->pool.waitForDone();
+	delete d_;
+}
+
+void HttpClient::send(const HttpRequestSpec &spec, QObject *context, std::function<void(const HttpResult &)> done)
+{
+	Impl *d = d_;
+	QPointer<QObject> ctx(context);
+	d->pool.start([d, spec, ctx, done]() {
+		const HttpResult res = d->run(spec);
+		if (QObject *c = ctx.data())
+			QMetaObject::invokeMethod(c, [done, res]() { done(res); }, Qt::QueuedConnection);
+	});
+}
+
+#else // Linux: Qt's network stack, which has TLS there.
 
 #include <QNetworkAccessManager>
 #include <QNetworkCookie>

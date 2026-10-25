@@ -11,8 +11,9 @@ class QObject;
 // Outgoing HTTP(S) for the bridge. Not Qt's network stack: OBS ships Qt
 // without its TLS plugins, so Qt's network stack can't open https:// at
 // all ("TLS initialization failed"). On Windows this is WinHTTP (the
-// system's own TLS), one request per pool thread; `done` runs on `context`'s
-// thread. A status of 0 means no answer (offline, timeout, bad TLS).
+// system's own TLS), on macOS the system's libcurl, one request per pool
+// thread; `done` runs on `context`'s thread. A status of 0 means no answer
+// (offline, timeout, bad TLS).
 struct HttpResult {
 	int status = 0;
 	QByteArray body;

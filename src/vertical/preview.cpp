@@ -210,8 +210,11 @@ void PreviewWidget::createDisplay()
 	info.zsformat = GS_ZS_NONE;
 #ifdef _WIN32
 	info.window.hwnd = reinterpret_cast<void *>(winId());
+#elif defined(__APPLE__)
+	// The widget's NSView, as OBS's own previews do (frontend qt-wrappers.cpp).
+	info.window.view = (id)winId();
 #else
-	return; // macOS and Linux need their own window handles; the plugin ships for Windows.
+	return; // Linux needs its display connection too; the plugin ships for Windows and macOS.
 #endif
 	display_ = obs_display_create(&info, 0x14100e);
 	if (display_)

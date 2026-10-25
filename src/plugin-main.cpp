@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "bridge.hpp"
 #include "dock.hpp"
+#include "games.hpp"
 #include "obs-state.hpp"
 #include "relay-output.hpp"
 #include "vertical/canvas.hpp"
@@ -79,6 +80,10 @@ void onEvent(enum obs_frontend_event event, void *)
 			relay.tick();
 			vertical.tick();
 			verticalRelay.tick();
+			// What's open on the PC, for game switching: every 2 s.
+			static int n = 0;
+			if (++n % 2 == 0)
+				games::tick();
 		});
 		ticker->start(1000);
 		break;
@@ -138,6 +143,7 @@ bool obs_module_load(void)
 			       []() { return vertical.sig(); });
 	verticalRelay.load();
 	verticalRecord.load();
+	games::load();
 	vertical.recorder = &verticalRecord;
 	dock::create();
 	vertical_docks::create(&vertical, []() { return verticalRelay.state(); });

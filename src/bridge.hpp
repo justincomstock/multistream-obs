@@ -23,8 +23,9 @@ struct HttpRequest {
 //                   and kept on disk, so it still opens when offline
 //   /cloud/...      Multistream Cloud's API, with the account's sign-in added
 //   /app/...        the Multistream app on this PC (Free plan: This PC)
-//   /bridge/...     OBS itself: state, Go live, End, settings fixes, and the
-//                   vertical canvas (bridge/vertical...)
+//   /bridge/...     OBS itself: state, Go live, End, settings fixes, the
+//                   vertical canvas (bridge/vertical...) and what's open on
+//                   the PC for game switching (bridge/games..., games.cpp)
 // Everything but the page needs the X-MS-Bridge secret the page is served
 // with, so no website can drive OBS through it; the Host must be this
 // address (no DNS rebinding).
