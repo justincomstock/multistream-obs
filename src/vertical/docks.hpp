@@ -20,5 +20,9 @@ namespace vertical_docks {
 void create(VerticalCanvas *canvas, std::function<QJsonObject()> live);
 void showOnFirstRun();                // FINISHED_LOADING
 void close();                         // EXIT
+// For the tests (websocket.cpp "docks"): every dock in OBS's window, its
+// size and minimum, so they can tell the dividers can still move; and the
+// Vertical Scenes rows' tags ("SHOWING", "ON AIR").
+QJsonObject report();
 
 } // namespace vertical_docks

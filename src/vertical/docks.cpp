@@ -17,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -122,6 +123,9 @@ QToolButton *iconButton(const char *icon, const QString &tip, const char *pill =
 }
 
 // A dock's root: the Multistream dock's look for it and everything in it.
+// Minimums stay small (contents scroll): five docks share OBS's right
+// column, and their minimums together must leave room to drag the dividers
+// in a 1030x870 window (scripts/test-obs-dock-sizes.cjs).
 QWidget *dockRoot(const char *name, int minW, int minH)
 {
 	auto *w = new QWidget();
@@ -238,8 +242,8 @@ void refreshScenes()
 		it->setData(Qt::UserRole, name);
 		it->setData(vtheme::SceneDelegate::OnAirRole, s.value("current").toBool());
 		it->setData(vtheme::SceneDelegate::MainsRole, mains.join(", "));
-		it->setToolTip(mains.isEmpty() ? QString("Shows when the main scene called \"%1\" is on air, if there is one.").arg(name)
-					       : "Shows when these main scenes are on air: " + mains.join(", "));
+		it->setToolTip(mains.isEmpty() ? QString("Shows when the main scene called \"%1\" is showing, if there is one.").arg(name)
+					       : "Shows when one of these main scenes is showing: " + mains.join(", "));
 		list->addItem(it);
 		if (name == (keep.isEmpty() ? canvas->currentScene() : keep))
 			list->setCurrentItem(it);
@@ -374,7 +378,7 @@ QWidget *makeScenesDock()
 {
 	// Design 3 ("Cards"): each scene a rounded card row; no boxes around
 	// them, so a small dock spends its room on the scenes.
-	QWidget *w = dockRoot("multistreamVerticalScenes", 160, 120);
+	QWidget *w = dockRoot("multistreamVerticalScenes", 160, 70);
 	auto *layout = new QVBoxLayout(scrolled(w));
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(0);
@@ -437,12 +441,12 @@ QWidget *makeScenesDock()
 	QLabel *followTitle = roleLabel("Follow the main scenes", "title");
 	followTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	ft->addWidget(followTitle);
-	followSub = roleLabel("Switches with the main scene on air", "muted");
+	followSub = roleLabel("Switches with the main scene that's showing", "muted");
 	followSub->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	ft->addWidget(followSub);
 	fl->addLayout(ft, 1);
 	follow = new vtheme::Switch();
-	follow->setToolTip("When a main scene goes on air, show the vertical scene it's linked to "
+	follow->setToolTip("When a main scene is shown, show the vertical scene it's linked to "
 			   "(right-click a vertical scene) or the one with the same name.");
 	followBox->setToolTip(follow->toolTip());
 	QObject::connect(follow, &QAbstractButton::toggled, follow, [](bool on) { canvas->setFollowMain(on); });
@@ -749,7 +753,7 @@ void itemAction(const char *what)
 QWidget *makeSourcesDock()
 {
 	// Design 1 ("Signal strip"), like the Multistream dock's platform list.
-	QWidget *w = dockRoot("multistreamVerticalSources", 160, 120);
+	QWidget *w = dockRoot("multistreamVerticalSources", 160, 70);
 	auto *layout = new QVBoxLayout(scrolled(w));
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(0);
@@ -777,7 +781,7 @@ QWidget *makeSourcesDock()
 	items->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
 	items->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
 	items->setContextMenuPolicy(Qt::CustomContextMenu);
-	items->setToolTip("The sources in the vertical scene on air, top first. Switch on to show; lock to keep in place.");
+	items->setToolTip("The sources in the vertical scene that's showing, top first. Switch on to show; lock to keep in place.");
 	QObject::connect(items, &QTreeWidget::currentItemChanged, items, [](QTreeWidgetItem *it, QTreeWidgetItem *) {
 		if (preview)
 			preview->select(it ? qint64(it->data(0, Qt::UserRole).toDouble()) : 0);
@@ -883,7 +887,7 @@ void refreshMixer(bool force)
 			delete li;
 		}
 		if (arr.isEmpty()) {
-			QLabel *none = roleLabel("No sound in the vertical scene on air.", "muted");
+			QLabel *none = roleLabel("No sound in the vertical scene that's showing.", "muted");
 			none->setWordWrap(true);
 			strips->addWidget(none, 1, Qt::AlignTop);
 		}
@@ -990,13 +994,13 @@ void fitStrips()
 
 QWidget *makeMixerDock()
 {
-	QWidget *w = dockRoot("multistreamVerticalMixer", 160, 100);
+	QWidget *w = dockRoot("multistreamVerticalMixer", 160, 70);
 	auto *layout = new QVBoxLayout(w);
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(0);
 	// No heading: the strips get the room. What it said is the tooltip.
 	auto *scroll = new QScrollArea();
-	scroll->setToolTip("Only sources in the vertical scene on air play here, plus Desktop Audio and Mic.\n"
+	scroll->setToolTip("Only sources in the vertical scene that's showing play here, plus Desktop Audio and Mic.\n"
 			   "Turn off MAIN on a source to give it its own vertical volume and mute.");
 	scroll->setObjectName("vMixScroll");
 	scroll->viewport()->setObjectName("vMixView");
@@ -1202,6 +1206,13 @@ void refreshLive()
 	liveLabel->setText("● " + text);
 	liveLabel->setToolTip(tip);
 	vtheme::setProp(liveLabel, "tone", tone);
+	// Vertical Scenes says ON AIR only while the vertical stream is out.
+	const bool out = st.value("sending").toBool() || st.value("reconnecting").toBool();
+	if (out != vtheme::SceneDelegate::live) {
+		vtheme::SceneDelegate::live = out;
+		if (list)
+			list->viewport()->update();
+	}
 }
 
 void refresh(bool force = false)
@@ -1217,7 +1228,7 @@ void refresh(bool force = false)
 			preview->sync();
 		if (sceneLabel) {
 			sceneLabel->setText(canvas->ready() ? canvas->currentScene() : QString("The vertical canvas is starting…"));
-			sceneLabel->setToolTip(canvas->ready() ? "On air: " + canvas->currentScene() : QString());
+			sceneLabel->setToolTip(canvas->ready() ? "Showing: " + canvas->currentScene() : QString());
 			sizeLabel->setText(canvas->ready() ? QString("%1×%2").arg(canvas->width()).arg(canvas->height())
 							   : QString());
 		}
@@ -1354,6 +1365,53 @@ void close()
 			*t = nullptr;
 		}
 	}
+}
+
+QJsonObject report()
+{
+	QJsonObject o;
+	auto *main = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	if (main) {
+		o["window"] = QJsonObject{{"width", main->width()}, {"height", main->height()}};
+		QJsonArray docks;
+		for (QDockWidget *dw : main->findChildren<QDockWidget *>()) {
+			const Qt::DockWidgetArea area = main->dockWidgetArea(dw);
+			QWidget *content = dw->widget();
+			docks.append(QJsonObject{
+				{"id", dw->objectName()},
+				{"title", dw->windowTitle()},
+				{"visible", dw->isVisible()},
+				{"floating", dw->isFloating()},
+				{"area", area == Qt::RightDockWidgetArea ? "right"
+					 : area == Qt::LeftDockWidgetArea ? "left"
+					 : area == Qt::BottomDockWidgetArea ? "bottom"
+					 : area == Qt::TopDockWidgetArea ? "top"
+									  : "none"},
+				{"x", dw->x()},
+				{"y", dw->y()},
+				{"width", dw->width()},
+				{"height", dw->height()},
+				// What the dock can't shrink below: its own minimum and its
+				// title bar on top of its contents'.
+				{"minWidth", dw->minimumSizeHint().width()},
+				{"minHeight", std::max(dw->minimumHeight(), dw->minimumSizeHint().height())},
+				{"contentMinHeight", content ? std::max(content->minimumHeight(), content->minimumSizeHint().height()) : 0},
+			});
+		}
+		o["docks"] = docks;
+	}
+	QJsonArray rows;
+	if (list)
+		for (int i = 0; i < list->count(); ++i) {
+			QListWidgetItem *it = list->item(i);
+			rows.append(QJsonObject{
+				{"name", it->text()},
+				{"tag", vtheme::SceneDelegate::tag(it->data(vtheme::SceneDelegate::OnAirRole).toBool(),
+								   it->data(vtheme::SceneDelegate::MainsRole).toString())},
+			});
+		}
+	o["sceneRows"] = rows;
+	return o;
 }
 
 } // namespace vertical_docks

@@ -83,12 +83,17 @@ private:
 	int level_ = 0;
 };
 
-// Vertical Scenes rows: a dot, the name, and "ON AIR" or the main scenes it
-// shows with. The item's text is its name; the roles below carry the rest.
+// Vertical Scenes rows: a dot, the name, and "SHOWING" (the scene in the
+// vertical picture), "ON AIR" (that, while a stream is out) or the main
+// scenes it shows with. The item's text is its name; the roles below carry
+// the rest. OnAirRole is "the scene shown"; `live` says a stream is out.
 class SceneDelegate : public QStyledItemDelegate {
 public:
 	static constexpr int OnAirRole = Qt::UserRole + 1;
 	static constexpr int MainsRole = Qt::UserRole + 2;
+	static inline bool live = false;
+	// The tag on a row: "ON AIR", "SHOWING", "← main scenes" or nothing.
+	static QString tag(bool shown, const QString &mains);
 	using QStyledItemDelegate::QStyledItemDelegate;
 	void paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &idx) const override;
 	QSize sizeHint(const QStyleOptionViewItem &opt, const QModelIndex &idx) const override;

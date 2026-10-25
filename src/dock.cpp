@@ -25,7 +25,10 @@ void dock::create()
 {
 	container = new QWidget();
 	container->setObjectName("multistreamDock");
-	container->setMinimumSize(300, 420);
+	// Small enough to share a column with the Vertical docks and still be
+	// resized: its page scrolls (a 420 minimum filled a 870 tall window's
+	// column with them, so no divider could move).
+	container->setMinimumSize(240, 160);
 	container->setStyleSheet("#multistreamDock { background: #0e0e13; } QLabel { color: #8a89a0; }");
 	auto *layout = new QVBoxLayout(container);
 	layout->setContentsMargins(0, 0, 0, 0);

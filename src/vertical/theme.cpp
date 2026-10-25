@@ -349,39 +349,49 @@ void Meter::paintEvent(QPaintEvent *)
 
 // ---- SceneDelegate -------------------------------------------------------------
 
+QString SceneDelegate::tag(bool shown, const QString &mains)
+{
+	if (shown)
+		return live ? QStringLiteral("ON AIR") : QStringLiteral("SHOWING");
+	return mains.isEmpty() ? QString() : QStringLiteral("← ") + mains;
+}
+
 void SceneDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &idx) const
 {
 	p->save();
 	p->setRenderHint(QPainter::Antialiasing);
 	const QRectF r = QRectF(opt.rect).adjusted(0, 1, 0, -1);
-	const bool onAir = idx.data(OnAirRole).toBool();
+	// Red "ON AIR" only while a stream is out: before that it's what the
+	// vertical picture shows, not what viewers see.
+	const bool shown = idx.data(OnAirRole).toBool();
+	const bool onAir = shown && live;
 	const bool sel = opt.state.testFlag(QStyle::State_Selected);
 	const bool hover = opt.state.testFlag(QStyle::State_MouseOver);
 	QColor bg = Qt::transparent;
 	if (onAir)
 		bg = QColor(255, 77, 109, sel ? 40 : 26);
-	else if (sel)
-		bg = QColor(169, 156, 255, 30);
+	else if (shown || sel)
+		bg = QColor(169, 156, 255, sel ? 34 : 22);
 	else if (hover)
 		bg = QColor(255, 255, 255, 10);
 	p->setPen(Qt::NoPen);
 	p->setBrush(bg);
 	p->drawRoundedRect(r, 9, 9);
-	p->setBrush(onAir ? ROSE : OFF);
+	p->setBrush(onAir ? ROSE : shown ? VIOLET : OFF);
 	p->drawEllipse(QPointF(r.left() + 14, r.center().y()), 4, 4);
 
 	const QString mains = idx.data(MainsRole).toString();
-	const QString tag = onAir ? QStringLiteral("ON AIR") : mains.isEmpty() ? QString() : QStringLiteral("← ") + mains;
+	const QString tag = SceneDelegate::tag(shown, mains);
 	QFont tf = opt.font;
 	tf.setPixelSize(10);
-	tf.setWeight(onAir ? QFont::Bold : QFont::Normal);
+	tf.setWeight(shown ? QFont::Bold : QFont::Normal);
 	const QFontMetrics tm(tf);
 	const QRectF body = r.adjusted(28, 0, -10, 0);
 	const QString tagText = tm.elidedText(tag, Qt::ElideRight, int(body.width() * 0.45));
 	const qreal tagW = tag.isEmpty() ? 0 : tm.horizontalAdvance(tagText) + 8;
 	if (!tag.isEmpty()) {
 		p->setFont(tf);
-		p->setPen(onAir ? ROSE_TEXT : MUTED);
+		p->setPen(onAir ? ROSE_TEXT : shown ? VIOLET : MUTED);
 		p->drawText(body, Qt::AlignRight | Qt::AlignVCenter, tagText);
 	}
 	QFont nf = opt.font;

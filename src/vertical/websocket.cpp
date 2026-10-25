@@ -1,6 +1,7 @@
 #include "websocket.hpp"
 
 #include "canvas.hpp"
+#include "docks.hpp"
 #include "record.hpp"
 #include "../relay-output.hpp"
 
@@ -95,6 +96,7 @@ const Request REQUESTS[] = {
 		 o["output"] = output->state();
 		 return o;
 	 }},
+	{"docks", [](const QJsonObject &) { return vertical_docks::report(); }},
 	{"get_scenes",
 	 [](const QJsonObject &) {
 		 QJsonObject o;
