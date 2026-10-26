@@ -27,7 +27,9 @@
 // sources and the vertical stream never hears main-only ones.
 //
 // A source follows its OBS fader and mute ("same", the default) until it
-// is given its own vertical volume ("own").
+// is given its own vertical volume ("own"). Like OBS's own mix, it leaves
+// out sources set to "Monitor only" (Advanced Audio Properties), and holds a
+// source back by its positive sync offset.
 class VerticalAudio {
 public:
 	~VerticalAudio();
@@ -42,8 +44,9 @@ public:
 	// Per-source vertical settings, keyed by source UUID.
 	struct Setting {
 		bool own = false;
-		float volume = 1.0f; // 0..1 multiplier, when own
+		float volume = 1.0f; // 0..2 multiplier (up to +6 dB), when own
 		bool muted = false;  // when own
+		bool hidden = false; // no strip in the Vertical Mixer (it still plays)
 	};
 	void setSetting(const std::string &uuid, const Setting &s);
 	Setting setting(const std::string &uuid) const;
@@ -62,9 +65,11 @@ private:
 		std::string name;
 		std::atomic<float> gain{1.0f};
 		std::atomic<float> peak{0.0f};
+		std::atomic<int64_t> offsetNs{0}; // its sync offset
 		std::mutex m;
 		std::deque<float> buf[MAX_AUDIO_CHANNELS];
 		bool primed = false;
+		size_t delayed = 0; // frames of silence queued for its sync offset
 	};
 
 	static void onCapture(void *param, obs_source_t *source, const struct audio_data *data, bool muted);

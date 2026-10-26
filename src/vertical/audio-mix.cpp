@@ -109,6 +109,10 @@ void VerticalAudio::setSources(const std::vector<obs_source_t *> &sources)
 
 float VerticalAudio::gainFor(obs_source_t *source, const Input &in, bool muted) const
 {
+	// "Monitor only": the streamer hears it, the stream doesn't (music they can't
+	// stream, for example). OBS's main mix leaves it out too.
+	if (obs_source_get_monitoring_type(source) == OBS_MONITORING_TYPE_MONITOR_ONLY)
+		return 0.0f;
 	std::lock_guard<std::mutex> lock(settingsMutex_);
 	auto it = settings_.find(in.uuid);
 	if (it != settings_.end() && it->second.own)
@@ -123,6 +127,7 @@ void VerticalAudio::onCapture(void *param, obs_source_t *source, const struct au
 		return;
 	const float gain = in->owner->gainFor(source, *in, muted);
 	in->gain.store(gain);
+	in->offsetNs.store(obs_source_get_sync_offset(source));
 	float peak = 0.0f;
 	std::lock_guard<std::mutex> lock(in->m);
 	// The sound arrives in OBS's own format: float planar, OBS's channels.
@@ -149,11 +154,25 @@ bool VerticalAudio::onMix(void *param, uint64_t start_ts, uint64_t, uint64_t *ne
 	std::lock_guard<std::mutex> lock(self->inputsMutex_);
 	for (const auto &in : self->inputs_) {
 		std::lock_guard<std::mutex> inLock(in->m);
-		size_t have = in->buf[0].size();
-		if (have > maxFrames) {
+		// A positive sync offset (Advanced Audio Properties) holds it back by
+		// that much silence, up to 20 seconds; a negative one can't be done here.
+		const int64_t off = std::clamp<int64_t>(in->offsetNs.load(), 0, 20000000000LL);
+		const size_t want = size_t(off * int64_t(self->rate_) / 1000000000LL);
+		if (want != in->delayed) {
 			for (size_t ch = 0; ch < self->channels_; ch++) {
 				auto &q = in->buf[ch];
-				q.erase(q.begin(), q.begin() + std::min(q.size(), have - PRIME_FRAMES));
+				if (want > in->delayed)
+					q.insert(q.begin(), want - in->delayed, 0.0f);
+				else
+					q.erase(q.begin(), q.begin() + std::min(q.size(), in->delayed - want));
+			}
+			in->delayed = want;
+		}
+		size_t have = in->buf[0].size();
+		if (have > maxFrames + in->delayed) {
+			for (size_t ch = 0; ch < self->channels_; ch++) {
+				auto &q = in->buf[ch];
+				q.erase(q.begin(), q.begin() + std::min(q.size(), have - PRIME_FRAMES - in->delayed));
 			}
 			have = in->buf[0].size();
 		}
@@ -172,9 +191,12 @@ bool VerticalAudio::onMix(void *param, uint64_t start_ts, uint64_t, uint64_t *ne
 					out[i] += q[i];
 			q.erase(q.begin(), q.begin() + take);
 		}
-		// Ran dry: wait for two blocks again rather than stutter.
-		if (n < AUDIO_OUTPUT_FRAMES)
+		// Ran dry: wait for two blocks again rather than stutter, and hold the
+		// next sound back by its offset again.
+		if (n < AUDIO_OUTPUT_FRAMES) {
 			in->primed = false;
+			in->delayed = 0;
+		}
 	}
 	return true;
 }
@@ -205,8 +227,9 @@ void VerticalAudio::loadSettings(obs_data_t *data)
 		obs_data_set_default_double(o, "volume", 1.0);
 		Setting s;
 		s.own = obs_data_get_bool(o, "own");
-		s.volume = float(std::clamp(obs_data_get_double(o, "volume"), 0.0, 1.0));
+		s.volume = float(std::clamp(obs_data_get_double(o, "volume"), 0.0, 2.0));
 		s.muted = obs_data_get_bool(o, "muted");
+		s.hidden = obs_data_get_bool(o, "hidden");
 		settings_[obs_data_item_get_name(item)] = s;
 		obs_data_release(o);
 	}
@@ -221,6 +244,7 @@ obs_data_t *VerticalAudio::saveSettings() const
 		obs_data_set_bool(o, "own", s.own);
 		obs_data_set_double(o, "volume", s.volume);
 		obs_data_set_bool(o, "muted", s.muted);
+		obs_data_set_bool(o, "hidden", s.hidden);
 		obs_data_set_obj(d, uuid.c_str(), o);
 		obs_data_release(o);
 	}
@@ -235,10 +259,20 @@ QJsonArray VerticalAudio::state() const
 		const Setting s = setting(in->uuid);
 		QJsonObject o;
 		o["uuid"] = QString::fromStdString(in->uuid);
-		o["name"] = QString::fromStdString(in->name);
+		// Its name now (it may have been renamed since it started playing).
+		QString name = QString::fromStdString(in->name);
+		bool monitorOnly = false;
+		if (obs_source_t *src = obs_weak_source_get_source(in->weak)) {
+			name = QString::fromUtf8(obs_source_get_name(src));
+			monitorOnly = obs_source_get_monitoring_type(src) == OBS_MONITORING_TYPE_MONITOR_ONLY;
+			obs_source_release(src);
+		}
+		o["name"] = name;
+		o["monitorOnly"] = monitorOnly;
 		o["mode"] = s.own ? "own" : "same";
 		o["volume"] = s.volume;
 		o["muted"] = s.muted;
+		o["hidden"] = s.hidden;
 		o["gain"] = in->gain.load();
 		o["peak"] = in->peak.load();
 		out.append(o);

@@ -1,5 +1,6 @@
 #include "theme.hpp"
 
+#include <QDateTime>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -327,9 +328,17 @@ Meter::Meter(QWidget *parent) : QWidget(parent)
 
 void Meter::setLevel(int level)
 {
-	if (level == level_)
+	// Peak hold, like OBS's meters: the loudest level stays lit for 1.5 seconds.
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	int hold = hold_;
+	if (level >= hold || now - holdAt_ > 1500) {
+		hold = level;
+		holdAt_ = now;
+	}
+	if (level == level_ && hold == hold_)
 		return;
 	level_ = level;
+	hold_ = hold;
 	update();
 }
 
@@ -339,9 +348,10 @@ void Meter::paintEvent(QPaintEvent *)
 	const bool across = width() > height(); // a mixer row: left to right
 	const int n = (across ? width() : height()) / 6;
 	const int lit = int(std::lround(double(n) * double(level_) / 100.0));
+	const int held = int(std::lround(double(n) * double(hold_) / 100.0)) - 1;
 	for (int i = 0; i < n; i++) {
 		QColor c(255, 255, 255, 20);
-		if (i < lit)
+		if (i < lit || (i == held && held > 0))
 			c = i >= n * 85 / 100 ? ROSE : i >= n * 70 / 100 ? AMBER : GREEN;
 		p.fillRect(across ? QRect(i * 6, 0, 4, height()) : QRect(0, height() - (i + 1) * 6 + 2, width(), 4), c);
 	}

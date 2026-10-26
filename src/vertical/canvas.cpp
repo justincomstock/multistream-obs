@@ -9,7 +9,9 @@
 
 #include <QCoreApplication>
 #include <QJsonArray>
+#include <QMap>
 #include <QMetaObject>
+#include <QSet>
 
 #include <algorithm>
 #include <climits>
@@ -111,10 +113,56 @@ void VerticalCanvas::load()
 	width_ = int(obs_data_get_int(config_, "width"));
 	height_ = int(obs_data_get_int(config_, "height"));
 	followMain_ = obs_data_get_bool(config_, "followMain");
+	if (obs_data_t *ui = obs_data_get_obj(config_, "ui")) {
+		transitionChoice_ = QString::fromUtf8(obs_data_get_string(ui, "transition"));
+		transitionMs_ = int(obs_data_get_int(ui, "transitionMs"));
+		obs_data_release(ui);
+	}
 	if (width_ < 64 || height_ < 64 || width_ > 8192 || height_ > 8192) {
 		width_ = 1080;
 		height_ = 1920;
 	}
+}
+
+int VerticalCanvas::uiInt(const char *key, int def) const
+{
+	obs_data_t *ui = config_ ? obs_data_get_obj(config_, "ui") : nullptr;
+	const int v = ui && obs_data_has_user_value(ui, key) ? int(obs_data_get_int(ui, key)) : def;
+	obs_data_release(ui);
+	return v;
+}
+
+void VerticalCanvas::setUiInt(const char *key, int value)
+{
+	if (!config_)
+		return;
+	obs_data_t *ui = obs_data_get_obj(config_, "ui");
+	if (!ui) {
+		ui = obs_data_create();
+		obs_data_set_obj(config_, "ui", ui);
+	}
+	obs_data_set_int(ui, key, value);
+	obs_data_release(ui);
+	save();
+}
+
+void VerticalCanvas::setTransition(const QString &type, int ms)
+{
+	transitionChoice_ = type == "cut_transition" || type == "fade_transition" ? type : QString();
+	transitionMs_ = std::clamp(ms, 0, 20000);
+	if (config_) {
+		obs_data_t *ui = obs_data_get_obj(config_, "ui");
+		if (!ui) {
+			ui = obs_data_create();
+			obs_data_set_obj(config_, "ui", ui);
+		}
+		obs_data_set_string(ui, "transition", transitionChoice_.toUtf8().constData());
+		obs_data_set_int(ui, "transitionMs", transitionMs_);
+		obs_data_release(ui);
+	}
+	ensureTransition();
+	changed();
+	save();
 }
 
 QString VerticalCanvas::collection() const
@@ -311,6 +359,7 @@ void VerticalCanvas::tick()
 	resetVideo();
 	refreshAudio();
 	registerSceneHotkeys(); // scenes made since
+	placePending();
 }
 
 void VerticalCanvas::onFrontendEvent(int event)
@@ -474,8 +523,12 @@ void VerticalCanvas::ensureTransition()
 {
 	if (!canvas_)
 		return;
-	obs_source_t *main = obs_frontend_get_current_transition();
-	const QString type = main ? QString::fromUtf8(obs_source_get_id(main)) : QString("cut_transition");
+	// OBS's own transition, unless the streamer picked one for vertical (a 16:9
+	// stinger would show letterboxed here).
+	obs_source_t *main = transitionChoice_.isEmpty() ? obs_frontend_get_current_transition() : nullptr;
+	const QString type = !transitionChoice_.isEmpty() ? transitionChoice_
+			     : main			  ? QString::fromUtf8(obs_source_get_id(main))
+							  : QString("cut_transition");
 	if (transition_ && type == transitionType_) {
 		if (main) {
 			// Same type, maybe new settings (a different stinger file).
@@ -572,7 +625,7 @@ void VerticalCanvas::showScene(obs_source_t *scene)
 		ensureTransition();
 	if (transition_) {
 		obs_source_t *now = obs_transition_get_active_source(transition_);
-		const uint32_t ms = uint32_t(std::max(0, obs_frontend_get_transition_duration()));
+		const uint32_t ms = uint32_t(transitionMs_ > 0 ? transitionMs_ : std::max(0, obs_frontend_get_transition_duration()));
 		// Mid-transition, or the first picture: straight there.
 		if (!now || now == scene || !obs_transition_start(transition_, OBS_TRANSITION_MODE_AUTO, ms, scene))
 			obs_transition_set(transition_, scene);
@@ -815,39 +868,48 @@ bool VerticalCanvas::moveScene(const QString &name, int delta, QString &error)
 	return true;
 }
 
-bool VerticalCanvas::addSource(const QString &scene, const QString &source, QString &error)
+bool VerticalCanvas::addSource(const QString &scene, const QString &source, QString &error, bool vertical)
 {
 	obs_scene_t *s = findScene(scene);
 	if (!s) {
 		error = "There's no vertical scene called \"" + scene + "\".";
 		return false;
 	}
-	obs_source_t *src = obs_get_source_by_name(source.toUtf8().constData());
+	obs_source_t *src = nullptr;
+	if (vertical) {
+		// A vertical scene lives on this canvas, not in OBS's own list of sources.
+		if (obs_scene_t *v = findScene(source)) {
+			src = obs_source_get_ref(obs_scene_get_source(v));
+			obs_scene_release(v);
+		}
+	} else {
+		src = obs_get_source_by_name(source.toUtf8().constData());
+	}
 	if (!src) {
 		obs_scene_release(s);
 		error = "There's no source called \"" + source + "\".";
 		return false;
 	}
+	if (source == scene) {
+		obs_source_release(src);
+		obs_scene_release(s);
+		error = "A scene can't be added to itself.";
+		return false;
+	}
 	obs_sceneitem_t *item = obs_scene_add(s, src);
 	if (item) {
-		// Fill the 9:16 frame, centred (the Vertical tool's "Fill").
-		struct vec2 bounds, pos;
-		vec2_set(&bounds, float(width_), float(height_));
-		vec2_set(&pos, float(width_) / 2.0f, float(height_) / 2.0f);
-		obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_OUTER);
-		obs_sceneitem_set_bounds(item, &bounds);
-		obs_sceneitem_set_bounds_alignment(item, OBS_ALIGN_CENTER);
-		obs_sceneitem_set_alignment(item, OBS_ALIGN_CENTER);
-		obs_sceneitem_set_pos(item, &pos);
-		// Trimmed to the frame, so its handles sit on what you see.
-		obs_sceneitem_set_bounds_crop(item, true);
+		placeNew(s, item);
+		undoableAdd(s, item);
 	}
 	const bool isScene = obs_scene_from_source(src) != nullptr;
+	const bool hasVideo = (obs_source_get_output_flags(src) & (OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO)) != 0;
 	obs_source_release(src);
 	obs_scene_release(s);
 	if (!item) {
-		error = isScene ? "OBS couldn't add that scene here (a scene can't contain itself)."
-				: "OBS couldn't add \"" + source + "\" to this vertical scene.";
+		error = isScene ? "\"" + source + "\" already has \"" + scene +
+					  "\" inside it, so adding it here would put the scene inside itself."
+		      : !hasVideo ? "\"" + source + "\" has no picture or sound, so it can't go in a scene."
+				  : "OBS couldn't add \"" + source + "\" to this vertical scene.";
 		return false;
 	}
 	refreshAudio();
@@ -890,29 +952,64 @@ void VerticalCanvas::refreshAudio()
 QJsonObject VerticalCanvas::audioState() const
 {
 	QJsonObject o;
-	o["sources"] = audio_.state();
+	QJsonArray sources = audio_.state();
+	// The sound in the other vertical scenes, not playing yet: its level can be
+	// set before switching to it ("offAir": no meter).
+	QSet<QString> playing;
+	for (const QJsonValue v : sources)
+		playing.insert(v.toObject().value("uuid").toString());
+	QMap<QString, QJsonObject> waiting; // by name, so the strips keep a steady order
+	for (const QString &name : sceneNames()) {
+		obs_scene_t *s = scene(name);
+		std::set<obs_source_t *> found;
+		collectAudio(s, found, 0);
+		for (obs_source_t *src : found) {
+			const QString uuid = QString::fromUtf8(obs_source_get_uuid(src));
+			if (playing.contains(uuid))
+				continue;
+			const VerticalAudio::Setting st = audio_.setting(uuid.toStdString());
+			QJsonObject w;
+			w["uuid"] = uuid;
+			w["name"] = QString::fromUtf8(obs_source_get_name(src));
+			w["monitorOnly"] = obs_source_get_monitoring_type(src) == OBS_MONITORING_TYPE_MONITOR_ONLY;
+			w["mode"] = st.own ? "own" : "same";
+			w["volume"] = st.volume;
+			w["muted"] = st.muted;
+			w["hidden"] = st.hidden;
+			w["gain"] = st.own ? (st.muted ? 0.0 : double(st.volume)) : double(obs_source_get_volume(src));
+			w["peak"] = 0.0;
+			w["offAir"] = true;
+			waiting.insert(w.value("name").toString() + uuid, w);
+		}
+		obs_scene_release(s);
+	}
+	for (const QJsonObject &w : waiting)
+		sources.append(w);
+	o["sources"] = sources;
 	return o;
 }
 
 bool VerticalCanvas::setAudio(const QString &source, const QJsonObject &in, QString &error)
 {
 	QString uuid;
-	for (const QJsonValue v : audio_.state()) {
+	for (const QJsonValue v : audioState().value("sources").toArray()) {
 		const QJsonObject s = v.toObject();
 		if (s.value("uuid").toString() == source || s.value("name").toString() == source)
 			uuid = s.value("uuid").toString();
 	}
 	if (uuid.isEmpty()) {
-		error = "\"" + source + "\" isn't playing in the vertical scene.";
+		error = "\"" + source + "\" isn't in a vertical scene, so it has no vertical volume.";
 		return false;
 	}
 	VerticalAudio::Setting s = audio_.setting(uuid.toStdString());
 	if (in.contains("mode"))
 		s.own = in.value("mode").toString() == "own";
 	if (in.contains("volume")) {
-		s.volume = float(qBound(0.0, in.value("volume").toDouble(), 1.0));
+		s.volume = float(qBound(0.0, in.value("volume").toDouble(), 2.0)); // up to +6 dB
 		s.own = true;
 	}
+	if (in.contains("hidden"))
+		s.hidden = in.value("hidden").toBool();
 	if (in.contains("muted")) {
 		s.muted = in.value("muted").toBool();
 		s.own = true;

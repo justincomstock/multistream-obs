@@ -81,6 +81,8 @@ protected:
 
 private:
 	int level_ = 0;
+	int hold_ = 0;       // the loudest lately: one lit segment that stays a moment
+	qint64 holdAt_ = 0; // when it was set (ms)
 };
 
 // Vertical Scenes rows: a dot, the name, and "SHOWING" (the scene in the

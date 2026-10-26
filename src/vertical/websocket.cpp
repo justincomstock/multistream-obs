@@ -157,7 +157,8 @@ const Request REQUESTS[] = {
 	{"add_source",
 	 [](const QJsonObject &in) {
 		 QString error;
-		 return canvas->addSource(in.value("scene").toString(), in.value("source").toString(), error)
+		 return canvas->addSource(in.value("scene").toString(), in.value("source").toString(), error,
+						  in.value("vertical").toBool())
 				? QJsonObject()
 				: fail(error);
 	 }},
@@ -207,11 +208,84 @@ const Request REQUESTS[] = {
 		 o["transform"] = canvas->itemTransform(sceneOf(in), id);
 		 return o;
 	 }},
+	// {source|id, action}: one of the right-click menu's Transform choices
+	// (VerticalCanvas::arrangeItem), answered with the item's new transform.
+	{"arrange_item",
+	 [](const QJsonObject &in) {
+		 QString error;
+		 const qint64 id = itemOf(in, error);
+		 if (!id || !canvas->arrangeItem(sceneOf(in), id, in.value("action").toString(), error))
+			 return fail(error);
+		 QJsonObject o;
+		 o["transform"] = canvas->itemTransform(sceneOf(in), id);
+		 return o;
+	 }},
 	{"remove_item",
 	 [](const QJsonObject &in) {
 		 QString error;
 		 const qint64 id = itemOf(in, error);
 		 return id && canvas->removeItem(sceneOf(in), id, error) ? QJsonObject() : fail(error);
+	 }},
+	// {scene?, paths: [{path}]}: files become sources (pictures, videos, sounds, .html).
+	// (OBS's request data keeps only lists of objects: plain values are lost.)
+	{"add_files",
+	 [](const QJsonObject &in) {
+		 QString error;
+		 QStringList paths;
+		 for (const QJsonValue v : in.value("paths").toArray())
+			 paths << (v.isObject() ? v.toObject().value("path").toString() : v.toString());
+		 const int added = canvas->addFiles(sceneOf(in), paths, error);
+		 if (added <= 0)
+			 return fail(error.isEmpty() ? QString("No files to add.") : error);
+		 QJsonObject o;
+		 o["added"] = added;
+		 if (!error.isEmpty())
+			 o["warning"] = error;
+		 return o;
+	 }},
+	// {scene?, id | source}: Ctrl+C on a source.
+	{"copy_source",
+	 [](const QJsonObject &in) {
+		 QString error;
+		 const qint64 id = itemOf(in, error);
+		 return id && canvas->copySource(sceneOf(in), id, error) ? QJsonObject() : fail(error);
+	 }},
+	// {scene?, duplicate?}: Ctrl+V (duplicate: a new copy, not the same source).
+	{"paste_source",
+	 [](const QJsonObject &in) {
+		 QString error;
+		 return canvas->pasteSource(sceneOf(in), in.value("duplicate").toBool(), error) ? QJsonObject()
+												    : fail(error);
+	 }},
+	// {scene?, ids: [{id}]}: the top-level sources' new order, top first.
+	{"reorder_items",
+	 [](const QJsonObject &in) {
+		 QString error;
+		 QList<qint64> ids;
+		 for (const QJsonValue v : in.value("ids").toArray())
+			 ids << qint64(v.isObject() ? v.toObject().value("id").toDouble() : v.toDouble());
+		 return canvas->reorderItems(sceneOf(in), ids, error) ? QJsonObject() : fail(error);
+	 }},
+	// {type: "" (OBS's) | "cut_transition" | "fade_transition", ms: 0 (OBS's) | n}
+	{"set_transition",
+	 [](const QJsonObject &in) {
+		 canvas->setTransition(in.value("type").toString(), in.value("ms").toInt());
+		 QJsonObject o;
+		 o["type"] = canvas->transitionChoice();
+		 o["ms"] = canvas->transitionMs();
+		 return o;
+	 }},
+	// {key, value?}: the docks' remembered choices (safeArea, previewOff); value sets it.
+	{"ui_setting",
+	 [](const QJsonObject &in) {
+		 const QByteArray key = in.value("key").toString().toUtf8();
+		 if (key != "safeArea" && key != "previewOff")
+			 return fail("Unknown setting");
+		 if (in.contains("value"))
+			 canvas->setUiInt(key.constData(), in.value("value").toInt());
+		 QJsonObject o;
+		 o["value"] = canvas->uiInt(key.constData(), 0);
+		 return o;
 	 }},
 	// {main, scene}: a new vertical scene laid out from main scene `main`.
 	{"create_from_main",
@@ -262,6 +336,13 @@ const Request REQUESTS[] = {
 	 [](const QJsonObject &) {
 		 canvas->recorder->stopRecording();
 		 return canvas->recorder->state();
+	 }},
+	// {on}: pause or carry on the vertical recording.
+	{"pause_record",
+	 [](const QJsonObject &in) {
+		 QString error;
+		 return canvas->recorder->setPaused(in.value("on").toBool(true), error) ? canvas->recorder->state()
+											: fail(error);
 	 }},
 	{"start_replay",
 	 [](const QJsonObject &) {

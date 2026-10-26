@@ -52,9 +52,11 @@ target_sources(
     src/http.cpp
     src/obs-state.cpp
     src/relay-output.cpp
+    src/vertical/arrange.cpp
     src/vertical/audio-mix.cpp
     src/vertical/canvas.cpp
     src/vertical/docks.cpp
+    src/vertical/item-menu.cpp
     src/vertical/items.cpp
     src/vertical/migrate.cpp
     src/vertical/record.cpp

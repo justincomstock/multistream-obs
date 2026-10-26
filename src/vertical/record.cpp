@@ -1,15 +1,21 @@
 #include "record.hpp"
 
 #include "canvas.hpp"
+#include "../obs-state.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
+#include <util/config-file.h>
 #include <util/platform.h>
 
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <algorithm>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonObject>
 #include <QMetaObject>
 
 namespace {
@@ -52,6 +58,46 @@ void releaseOutput(obs_output_t *&o)
 	o = nullptr;
 }
 
+// OBS's file name settings (Settings -> Advanced -> Recording), so the
+// vertical files are named like the main ones: "Vertical " + OBS's format.
+struct Naming {
+	QString format = "%CCYY-%MM-%DD %hh-%mm-%ss";
+	bool spaces = true;
+	bool overwrite = false;
+	// Settings -> Output -> Recording -> Automatic file splitting (Advanced mode)
+	bool split = false;
+	int splitSec = 0;
+	int splitMb = 0;
+};
+
+Naming naming()
+{
+	Naming n;
+	config_t *cfg = obs_frontend_get_profile_config();
+	if (!cfg)
+		return n;
+	if (const char *f = config_get_string(cfg, "Output", "FilenameFormatting"); f && *f)
+		n.format = QString::fromUtf8(f);
+	const char *mode = config_get_string(cfg, "Output", "Mode");
+	const bool advanced = mode && QString::fromUtf8(mode).compare("Advanced", Qt::CaseInsensitive) == 0;
+	n.spaces = !config_get_bool(cfg, advanced ? "AdvOut" : "SimpleOutput",
+				    advanced ? "RecFileNameWithoutSpace" : "FileNameWithoutSpace");
+	n.overwrite = config_get_bool(cfg, "Output", "OverwriteIfExists");
+	if (advanced && config_get_bool(cfg, "AdvOut", "RecSplitFile")) {
+		const char *type = config_get_string(cfg, "AdvOut", "RecSplitFileType");
+		const QString t = type ? QString::fromUtf8(type) : QString("Time");
+		if (t == "Time") {
+			n.split = true;
+			n.splitSec = int(config_get_int(cfg, "AdvOut", "RecSplitFileTime")) * 60;
+		} else if (t == "Size") {
+			n.split = true;
+			n.splitMb = int(config_get_int(cfg, "AdvOut", "RecSplitFileSize"));
+		}
+		n.split = n.split && (n.splitSec > 0 || n.splitMb > 0);
+	}
+	return n;
+}
+
 } // namespace
 
 void VerticalRecorder::load()
@@ -67,7 +113,7 @@ void VerticalRecorder::load()
 			format_ = f;
 		if (const int s = int(obs_data_get_int(d, "replaySeconds")); s >= 5 && s <= 600)
 			replaySeconds_ = s;
-		if (const int b = int(obs_data_get_int(d, "bitrate")); b >= 1000 && b <= 100000)
+		if (const int b = int(obs_data_get_int(d, "bitrate")); b == 0 || (b >= 1000 && b <= 100000))
 			bitrate_ = b;
 	}
 	registerHotkeys();
@@ -124,8 +170,10 @@ void VerticalRecorder::registerHotkeys()
 				return;
 			auto *self = static_cast<VerticalRecorder *>(data);
 			onUi([self]() {
+				// A hotkey press shows nothing by itself: say when it didn't work.
 				QString error;
-				self->saveReplay(error);
+				if (!self->saveReplay(error))
+					self->notify("No clip saved: " + error);
 			});
 		},
 		this);
@@ -167,6 +215,23 @@ QString VerticalRecorder::folder() const
 	return out;
 }
 
+int VerticalRecorder::bitrate() const
+{
+	if (bitrate_ > 0)
+		return bitrate_;
+	// "Same as the main stream": its bitrate (a 1080x1920 picture has as many
+	// pixels as a 1920x1080 one).
+	const int main = obsstate::snapshot().value("encoder").toObject().value("bitrate").toInt();
+	return main >= 1000 ? std::min(main, 100000) : 12000;
+}
+
+void VerticalRecorder::notify(const QString &text, const QString &file)
+{
+	notice_ = text;
+	noticeFile_ = file;
+	noticeSeq_++;
+}
+
 bool VerticalRecorder::encoders(QString &error)
 {
 	if (!canvas_->ready() || !canvas_->audio()) {
@@ -174,7 +239,8 @@ bool VerticalRecorder::encoders(QString &error)
 		return false;
 	}
 	// Rebuilt only while nothing records (a new picture size, or a new canvas).
-	const QString sig = canvas_->sig() + QString::number(quintptr(canvas_->video())) + QString::number(bitrate_);
+	const int kbps = bitrate();
+	const QString sig = canvas_->sig() + QString::number(quintptr(canvas_->video())) + QString::number(kbps);
 	if (venc_ && aenc_ && (sig == encSig_ || active(record_) || active(replay_)))
 		return true;
 	releaseOutput(record_);
@@ -185,12 +251,16 @@ bool VerticalRecorder::encoders(QString &error)
 
 	obs_data_t *vs = obs_data_create();
 	obs_data_set_string(vs, "rate_control", "CBR");
-	obs_data_set_int(vs, "bitrate", bitrate_);
+	obs_data_set_int(vs, "bitrate", kbps);
 	obs_data_set_int(vs, "keyint_sec", 2);
 	obs_data_set_string(vs, "profile", "high");
 	obs_data_set_string(vs, "preset", "veryfast");
 	obs_data_set_string(vs, "preset2", "p5");
 	for (const Enc &e : ENCODERS) {
+		// OBS hands back a placeholder for an id it doesn't have (NVENC on a
+		// Mac), so only try encoders this OBS actually registered.
+		if (!obs_get_encoder_codec(e.id))
+			continue;
 		venc_ = obs_video_encoder_create(e.id, "Multistream vertical recording video", vs, nullptr);
 		if (venc_)
 			break;
@@ -198,9 +268,8 @@ bool VerticalRecorder::encoders(QString &error)
 	obs_data_release(vs);
 	obs_data_t *as = obs_data_create();
 	obs_data_set_int(as, "bitrate", 192);
-	aenc_ = obs_audio_encoder_create("ffmpeg_aac", "Multistream vertical recording audio", as, 0, nullptr);
-	if (!aenc_)
-		aenc_ = obs_audio_encoder_create("CoreAudio_AAC", "Multistream vertical recording audio", as, 0, nullptr);
+	const char *aac = obs_get_encoder_codec("ffmpeg_aac") ? "ffmpeg_aac" : "CoreAudio_AAC";
+	aenc_ = obs_audio_encoder_create(aac, "Multistream vertical recording audio", as, 0, nullptr);
 	obs_data_release(as);
 	if (!venc_ || !aenc_) {
 		error = "No encoder could be made for the vertical recording.";
@@ -270,6 +339,7 @@ void VerticalRecorder::onReplaySaved(void *data, calldata_t *)
 		if (proc_handler_call(ph, "get_last_replay", &cd)) {
 			const char *p = calldata_string(&cd, "path");
 			self->lastReplay_ = p ? QString::fromUtf8(p) : QString();
+			self->notify("Clip saved", self->lastReplay_);
 			obs_log(LOG_INFO, "vertical: replay saved to %s", p ? p : "?");
 		}
 		calldata_free(&cd);
@@ -286,9 +356,27 @@ bool VerticalRecorder::startRecording(QString &error)
 	}
 	releaseOutput(record_);
 	const QString ext = format_ == "mkv" ? "mkv" : "mp4";
-	const QString path = folder() + "/Vertical " + QDateTime::currentDateTime().toString("yyyy-MM-dd hh-mm-ss") + "." + ext;
+	const Naming n = naming();
+	const QString format = "Vertical " + n.format;
+	char *name = os_generate_formatted_filename(ext.toUtf8().constData(), n.spaces, format.toUtf8().constData());
+	QString path = folder() + "/" + QString::fromUtf8(name);
+	bfree(name);
+	// Never over an older recording, unless OBS's own setting says to.
+	for (int i = 2; !n.overwrite && QFile::exists(path) && i < 100; i++)
+		path = folder() + "/" + QFileInfo(path).completeBaseName().section(" (", 0, 0) + QString(" (%1).").arg(i) + ext;
 	obs_data_t *s = obs_data_create();
 	obs_data_set_string(s, "path", path.toUtf8().constData());
+	if (n.split) {
+		// Like OBS's own: a new file every so many minutes or megabytes.
+		obs_data_set_bool(s, "split_file", true);
+		obs_data_set_string(s, "directory", folder().toUtf8().constData());
+		obs_data_set_string(s, "format", format.toUtf8().constData());
+		obs_data_set_string(s, "extension", ext.toUtf8().constData());
+		obs_data_set_bool(s, "allow_spaces", n.spaces);
+		obs_data_set_bool(s, "allow_overwrite", n.overwrite);
+		obs_data_set_int(s, "max_time_sec", n.splitSec);
+		obs_data_set_int(s, "max_size_mb", n.splitMb);
+	}
 	// OBS's hybrid MP4 survives a crash; plain ffmpeg MP4 wouldn't.
 	if (ext == "mp4")
 		record_ = obs_output_create("mp4_output", "Multistream vertical recording", s, nullptr);
@@ -320,6 +408,26 @@ void VerticalRecorder::stopRecording()
 		obs_output_stop(record_);
 }
 
+bool VerticalRecorder::paused() const
+{
+	return active(record_) && obs_output_paused(record_);
+}
+
+bool VerticalRecorder::setPaused(bool on, QString &error)
+{
+	if (!active(record_)) {
+		error = "The vertical recording isn't running.";
+		return false;
+	}
+	if (obs_output_paused(record_) == on)
+		return true;
+	if (!obs_output_pause(record_, on)) {
+		error = on ? "This recording can't be paused." : "The vertical recording couldn't carry on.";
+		return false;
+	}
+	return true;
+}
+
 bool VerticalRecorder::startReplay(QString &error)
 {
 	if (replayActive())
@@ -331,9 +439,10 @@ bool VerticalRecorder::startReplay(QString &error)
 	releaseOutput(replay_);
 	obs_data_t *s = obs_data_create();
 	obs_data_set_string(s, "directory", folder().toUtf8().constData());
-	obs_data_set_string(s, "format", "Vertical Replay %CCYY-%MM-%DD %hh-%mm-%ss");
+	const Naming n = naming();
+	obs_data_set_string(s, "format", ("Vertical Replay " + n.format).toUtf8().constData());
 	obs_data_set_string(s, "extension", format_ == "mkv" ? "mkv" : "mp4");
-	obs_data_set_bool(s, "allow_spaces", true);
+	obs_data_set_bool(s, "allow_spaces", n.spaces);
 	obs_data_set_int(s, "max_time_sec", replaySeconds_);
 	obs_data_set_int(s, "max_size_mb", 0);
 	replay_ = obs_output_create("replay_buffer", "Multistream vertical replay buffer", s, nullptr);
@@ -387,6 +496,12 @@ void VerticalRecorder::onFrontendEvent(int event)
 		if (followMain_)
 			stopRecording();
 		break;
+	// OBS's Pause button pauses the vertical recording too.
+	case OBS_FRONTEND_EVENT_RECORDING_PAUSED:
+	case OBS_FRONTEND_EVENT_RECORDING_UNPAUSED:
+		if (followMain_ && recording())
+			setPaused(event == OBS_FRONTEND_EVENT_RECORDING_PAUSED, ignored);
+		break;
 	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
 		if (followMain_)
 			startReplay(ignored);
@@ -399,11 +514,27 @@ void VerticalRecorder::onFrontendEvent(int event)
 		if (followMain_ && replayActive())
 			saveReplay(ignored);
 		break;
-	// The canvas goes away with the collection: let go of its video first.
+	// The canvas goes away with the collection: let go of its video first,
+	// then carry on in a new file once the new collection's canvas is up.
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+		resumeRecord_ = recording();
+		resumeReplay_ = replayActive();
 		releaseOutput(record_);
 		releaseOutput(replay_);
 		releaseEncodersIfIdle();
+		break;
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		if (resumeRecord_ || resumeReplay_) {
+			const bool rec = resumeRecord_, rep = resumeReplay_;
+			resumeRecord_ = resumeReplay_ = false;
+			onUi([this, rec, rep]() {
+				QString error;
+				const bool ok = (!rec || startRecording(error)) && (!rep || startReplay(error));
+				notify(ok ? QString("Switching scene collections stopped the vertical recording for a moment: it "
+						    "carries on in a new file.")
+					  : "Switching scene collections stopped the vertical recording: " + error);
+			});
+		}
 		break;
 	default:
 		break;
@@ -428,6 +559,7 @@ QJsonObject VerticalRecorder::state() const
 {
 	QJsonObject o;
 	o["recording"] = recording();
+	o["paused"] = paused();
 	o["replay"] = replayActive();
 	o["followMain"] = followMain_;
 	o["format"] = format_;
@@ -437,6 +569,9 @@ QJsonObject VerticalRecorder::state() const
 	o["lastFile"] = lastFile_;
 	o["lastReplay"] = lastReplay_;
 	o["error"] = error_;
+	o["notice"] = notice_;
+	o["noticeFile"] = noticeFile_;
+	o["noticeSeq"] = noticeSeq_;
 	return o;
 }
 
@@ -448,7 +583,9 @@ void VerticalRecorder::configure(const QJsonObject &in)
 		format_ = in.value("format").toString();
 	if (in.contains("replaySeconds"))
 		replaySeconds_ = qBound(5, in.value("replaySeconds").toInt(), 600);
-	if (in.contains("bitrate"))
-		bitrate_ = qBound(1000, in.value("bitrate").toInt(), 100000);
+	if (in.contains("bitrate")) {
+		const int b = in.value("bitrate").toInt();
+		bitrate_ = b == 0 ? 0 : qBound(1000, b, 100000); // 0: same as the main stream
+	}
 	save();
 }

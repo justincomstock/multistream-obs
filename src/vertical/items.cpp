@@ -9,6 +9,9 @@
 #include <graphics/vec2.h>
 #include <graphics/vec3.h>
 
+#include <QDir>
+#include <QFileInfo>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -17,9 +20,33 @@
 
 namespace {
 
+// An item by id, at the top or inside one of the scene's groups.
 obs_sceneitem_t *itemIn(obs_scene_t *scene, qint64 id)
 {
-	return scene ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+	if (!scene)
+		return nullptr;
+	if (obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(scene, id))
+		return item;
+	struct Find {
+		qint64 id;
+		obs_sceneitem_t *found;
+	} f{id, nullptr};
+	obs_scene_enum_items(
+		scene,
+		[](obs_scene_t *, obs_sceneitem_t *item, void *p) {
+			auto *f = static_cast<Find *>(p);
+			if (obs_sceneitem_is_group(item))
+				f->found = obs_scene_find_sceneitem_by_id(obs_sceneitem_group_get_scene(item), f->id);
+			return f->found == nullptr;
+		},
+		&f);
+	return f.found;
+}
+
+// Whether the item sits inside a group (its position is in the group's pixels).
+bool inGroup(obs_scene_t *scene, obs_sceneitem_t *item)
+{
+	return item && obs_scene_find_sceneitem_by_id(scene, obs_sceneitem_get_id(item)) != item;
 }
 
 bool isCamera(const char *id)
@@ -76,33 +103,62 @@ void placeIn(obs_sceneitem_t *item, float x, float y, float w, float h, bool fil
 
 } // namespace
 
+namespace {
+
+// sceneItems' rows, bottom first; a group's sources come right before it, so
+// they follow it once the list is turned top first.
+struct ItemCollect {
+	std::vector<QJsonObject> items;
+	qint64 parent = 0;
+};
+
+bool collectItem(obs_scene_t *, obs_sceneitem_t *item, void *p)
+{
+	auto *c = static_cast<ItemCollect *>(p);
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	QJsonObject o;
+	o["id"] = double(obs_sceneitem_get_id(item));
+	o["name"] = QString::fromUtf8(obs_source_get_name(src));
+	o["type"] = QString::fromUtf8(obs_source_get_id(src));
+	o["visible"] = obs_sceneitem_visible(item);
+	o["locked"] = obs_sceneitem_locked(item);
+	o["audio"] = (obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) != 0;
+	o["video"] = (obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) != 0;
+	o["group"] = obs_sceneitem_is_group(item);
+	o["parent"] = double(c->parent);
+	if (obs_sceneitem_is_group(item)) {
+		ItemCollect inner;
+		inner.parent = obs_sceneitem_get_id(item);
+		obs_sceneitem_group_enum_items(item, collectItem, &inner);
+		c->items.insert(c->items.end(), inner.items.begin(), inner.items.end());
+	}
+	c->items.push_back(o);
+	return true;
+}
+
+} // namespace
+
+obs_sceneitem_t *VerticalCanvas::itemById(obs_scene_t *scene, qint64 id)
+{
+	return itemIn(scene, id);
+}
+
+bool VerticalCanvas::isInGroup(obs_scene_t *scene, obs_sceneitem_t *item)
+{
+	return inGroup(scene, item);
+}
+
 QJsonArray VerticalCanvas::sceneItems(const QString &scene) const
 {
 	QJsonArray out;
 	obs_scene_t *s = findScene(scene);
 	if (!s)
 		return out;
-	std::vector<QJsonObject> items;
-	obs_scene_enum_items(
-		s,
-		[](obs_scene_t *, obs_sceneitem_t *item, void *p) {
-			obs_source_t *src = obs_sceneitem_get_source(item);
-			QJsonObject o;
-			o["id"] = double(obs_sceneitem_get_id(item));
-			o["name"] = QString::fromUtf8(obs_source_get_name(src));
-			o["type"] = QString::fromUtf8(obs_source_get_id(src));
-			o["visible"] = obs_sceneitem_visible(item);
-			o["locked"] = obs_sceneitem_locked(item);
-			o["audio"] = (obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) != 0;
-			o["video"] = (obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) != 0;
-			o["group"] = obs_sceneitem_is_group(item);
-			static_cast<std::vector<QJsonObject> *>(p)->push_back(o);
-			return true;
-		},
-		&items);
+	ItemCollect col;
+	obs_scene_enum_items(s, collectItem, &col);
 	obs_scene_release(s);
 	// OBS lists bottom first; the dock shows the top first, like OBS's.
-	for (auto it = items.rbegin(); it != items.rend(); ++it)
+	for (auto it = col.items.rbegin(); it != col.items.rend(); ++it)
 		out.append(*it);
 	return out;
 }
@@ -116,10 +172,129 @@ QJsonArray VerticalCanvas::sceneItems(const QString &scene) const
 		return false;                                                          \
 	}
 
+namespace {
+
+// Undo of show/hide and lock: {scene, id, what: "visible" | "locked", on}.
+void setFlag(const char *data)
+{
+	obs_data_t *d = obs_data_create_from_json(data);
+	obs_source_t *sceneSrc = obs_get_source_by_uuid(obs_data_get_string(d, "scene"));
+	if (obs_sceneitem_t *item = itemIn(obs_scene_from_source(sceneSrc), qint64(obs_data_get_int(d, "id")))) {
+		if (strcmp(obs_data_get_string(d, "what"), "visible") == 0)
+			obs_sceneitem_set_visible(item, obs_data_get_bool(d, "on"));
+		else
+			obs_sceneitem_set_locked(item, obs_data_get_bool(d, "on"));
+	}
+	obs_source_release(sceneSrc);
+	obs_data_release(d);
+}
+
+std::string flagData(obs_scene_t *scene, qint64 id, const char *what, bool on)
+{
+	obs_data_t *d = obs_data_create();
+	obs_data_set_string(d, "scene", obs_source_get_uuid(obs_scene_get_source(scene)));
+	obs_data_set_int(d, "id", id);
+	obs_data_set_string(d, "what", what);
+	obs_data_set_bool(d, "on", on);
+	std::string json = obs_data_get_json(d);
+	obs_data_release(d);
+	return json;
+}
+
+void addFlagUndo(obs_scene_t *scene, obs_sceneitem_t *item, const char *what, bool on)
+{
+	const qint64 id = obs_sceneitem_get_id(item);
+	const std::string undo = flagData(scene, id, what, !on), redo = flagData(scene, id, what, on);
+	const char *name = obs_source_get_name(obs_sceneitem_get_source(item));
+	const std::string label = strcmp(what, "visible") == 0 ? std::string(on ? "Show " : "Hide ") + name + " (vertical)"
+							      : std::string(on ? "Lock " : "Unlock ") + name + " (vertical)";
+	obs_frontend_add_undo_redo_action(label.c_str(), setFlag, setFlag, undo.c_str(), redo.c_str(), false);
+}
+
+// The scene's top-level items, bottom first: {scene, ids: [{id}]}.
+std::string orderData(obs_scene_t *scene)
+{
+	obs_data_t *d = obs_data_create();
+	obs_data_set_string(d, "scene", obs_source_get_uuid(obs_scene_get_source(scene)));
+	obs_data_array_t *ids = obs_data_array_create();
+	obs_scene_enum_items(
+		scene,
+		[](obs_scene_t *, obs_sceneitem_t *item, void *p) {
+			obs_data_t *o = obs_data_create();
+			obs_data_set_int(o, "id", obs_sceneitem_get_id(item));
+			obs_data_array_push_back(static_cast<obs_data_array_t *>(p), o);
+			obs_data_release(o);
+			return true;
+		},
+		ids);
+	obs_data_set_array(d, "ids", ids);
+	obs_data_array_release(ids);
+	std::string json = obs_data_get_json(d);
+	obs_data_release(d);
+	return json;
+}
+
+void loadOrder(const char *data)
+{
+	obs_data_t *d = obs_data_create_from_json(data);
+	obs_source_t *sceneSrc = obs_get_source_by_uuid(obs_data_get_string(d, "scene"));
+	if (obs_scene_t *scene = obs_scene_from_source(sceneSrc)) {
+		obs_data_array_t *ids = obs_data_get_array(d, "ids");
+		int at = 0;
+		for (size_t i = 0; i < obs_data_array_count(ids); i++) {
+			obs_data_t *o = obs_data_array_item(ids, i);
+			if (obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(scene, obs_data_get_int(o, "id")))
+				obs_sceneitem_set_order_position(item, at++);
+			obs_data_release(o);
+		}
+		obs_data_array_release(ids);
+	}
+	obs_source_release(sceneSrc);
+	obs_data_release(d);
+}
+
+// Undo of a rename: {uuid, name}.
+void loadName(const char *data)
+{
+	obs_data_t *d = obs_data_create_from_json(data);
+	if (obs_source_t *src = obs_get_source_by_uuid(obs_data_get_string(d, "uuid"))) {
+		obs_source_set_name(src, obs_data_get_string(d, "name"));
+		obs_source_release(src);
+	}
+	obs_data_release(d);
+}
+
+std::string nameData(obs_source_t *src, const QString &name)
+{
+	obs_data_t *d = obs_data_create();
+	obs_data_set_string(d, "uuid", obs_source_get_uuid(src));
+	obs_data_set_string(d, "name", name.toUtf8().constData());
+	std::string json = obs_data_get_json(d);
+	obs_data_release(d);
+	return json;
+}
+
+// A source name nobody has yet: "Base", "Base 2", ...
+QString freeSourceName(const QString &base)
+{
+	for (int i = 1;; i++) {
+		const QString n = i == 1 ? base : QString("%1 %2").arg(base).arg(i);
+		obs_source_t *have = obs_get_source_by_name(n.toUtf8().constData());
+		if (!have)
+			return n;
+		obs_source_release(have);
+	}
+}
+
+} // namespace
+
 bool VerticalCanvas::setItemVisible(const QString &scene, qint64 id, bool on, QString &error)
 {
 	WITH_ITEM(scene, id, error)
-	obs_sceneitem_set_visible(item, on);
+	if (obs_sceneitem_visible(item) != on) {
+		obs_sceneitem_set_visible(item, on);
+		addFlagUndo(s_, item, "visible", on);
+	}
 	obs_scene_release(s_);
 	refreshAudio();
 	return true;
@@ -128,7 +303,10 @@ bool VerticalCanvas::setItemVisible(const QString &scene, qint64 id, bool on, QS
 bool VerticalCanvas::setItemLocked(const QString &scene, qint64 id, bool on, QString &error)
 {
 	WITH_ITEM(scene, id, error)
-	obs_sceneitem_set_locked(item, on);
+	if (obs_sceneitem_locked(item) != on) {
+		obs_sceneitem_set_locked(item, on);
+		addFlagUndo(s_, item, "locked", on);
+	}
 	obs_scene_release(s_);
 	return true;
 }
@@ -136,8 +314,61 @@ bool VerticalCanvas::setItemLocked(const QString &scene, qint64 id, bool on, QSt
 bool VerticalCanvas::moveItem(const QString &scene, qint64 id, int movement, QString &error)
 {
 	WITH_ITEM(scene, id, error)
+	const bool top = !inGroup(s_, item); // a group's own order isn't in the undo
+	const std::string before = top ? orderData(s_) : std::string();
 	obs_sceneitem_set_order(item, static_cast<enum obs_order_movement>(movement));
+	if (top) {
+		const std::string after = orderData(s_);
+		if (after != before)
+			obs_frontend_add_undo_redo_action("Reorder vertical sources", loadOrder, loadOrder, before.c_str(),
+							  after.c_str(), false);
+	}
 	obs_scene_release(s_);
+	return true;
+}
+
+bool VerticalCanvas::reorderItems(const QString &scene, const QList<qint64> &topFirst, QString &error)
+{
+	obs_scene_t *s = findScene(scene);
+	if (!s) {
+		error = "There's no vertical scene called \"" + scene + "\".";
+		return false;
+	}
+	std::vector<obs_sceneitem_t *> order; // bottom first
+	for (auto it = topFirst.crbegin(); it != topFirst.crend(); ++it)
+		if (obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(s, *it))
+			order.push_back(item);
+	const std::string before = orderData(s);
+	for (size_t i = 0; i < order.size(); i++)
+		obs_sceneitem_set_order_position(order[i], int(i));
+	const std::string after = orderData(s);
+	if (after != before)
+		obs_frontend_add_undo_redo_action("Reorder vertical sources", loadOrder, loadOrder, before.c_str(),
+						  after.c_str(), false);
+	obs_scene_release(s);
+	return true;
+}
+
+bool VerticalCanvas::renameSource(obs_source_t *src, const QString &to, QString &error)
+{
+	const QString name = to.trimmed();
+	const QString old = QString::fromUtf8(obs_source_get_name(src));
+	if (name.isEmpty()) {
+		error = "Give the source a name.";
+		return false;
+	}
+	if (name == old)
+		return true;
+	if (obs_source_t *have = obs_get_source_by_name(name.toUtf8().constData())) {
+		obs_source_release(have);
+		error = "There's already a source called \"" + name + "\".";
+		return false;
+	}
+	const std::string undo = nameData(src, old), redo = nameData(src, name);
+	obs_source_set_name(src, name.toUtf8().constData());
+	const std::string label = "Rename " + old.toStdString() + " (vertical)";
+	obs_frontend_add_undo_redo_action(label.c_str(), loadName, loadName, undo.c_str(), redo.c_str(), false);
+	changed();
 	return true;
 }
 
@@ -190,27 +421,35 @@ void reremove(const char *data)
 {
 	obs_data_t *d = obs_data_create_from_json(data);
 	obs_source_t *sceneSrc = obs_get_source_by_uuid(obs_data_get_string(d, "scene"));
-	if (obs_scene_t *scene = obs_scene_from_source(sceneSrc))
-		if (obs_sceneitem_t *item = obs_scene_find_source(scene, obs_data_get_string(d, "name")))
+	if (obs_scene_t *scene = obs_scene_from_source(sceneSrc)) {
+		// The same item if it's still there (a source can be in a scene twice).
+		obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(scene, obs_data_get_int(d, "id"));
+		obs_source_t *src = item ? obs_sceneitem_get_source(item) : nullptr;
+		if (!src || strcmp(obs_source_get_name(src), obs_data_get_string(d, "name")) != 0)
+			item = obs_scene_find_source(scene, obs_data_get_string(d, "name"));
+		if (item)
 			obs_sceneitem_remove(item);
+	}
 	obs_source_release(sceneSrc);
 	obs_data_release(d);
 }
 
 } // namespace
 
-bool VerticalCanvas::removeItem(const QString &scene, qint64 id, QString &error)
+namespace {
+
+// Everything unremove() needs to put the item back as it is now.
+std::string snapshotOf(obs_scene_t *scene, obs_sceneitem_t *item)
 {
-	WITH_ITEM(scene, id, error)
-	// Saved first, so OBS's Edit -> Undo can bring it back.
 	obs_source_t *src = obs_sceneitem_get_source(item);
 	struct obs_transform_info t;
 	obs_sceneitem_get_info2(item, &t);
 	struct obs_sceneitem_crop c;
 	obs_sceneitem_get_crop(item, &c);
 	obs_data_t *d = obs_data_create();
-	obs_data_set_string(d, "scene", obs_source_get_uuid(obs_scene_get_source(s_)));
+	obs_data_set_string(d, "scene", obs_source_get_uuid(obs_scene_get_source(scene)));
 	obs_data_set_string(d, "name", obs_source_get_name(src));
+	obs_data_set_int(d, "id", obs_sceneitem_get_id(item));
 	obs_data_t *saved = obs_save_source(src);
 	obs_data_set_obj(d, "source", saved);
 	obs_data_release(saved);
@@ -229,12 +468,132 @@ bool VerticalCanvas::removeItem(const QString &scene, qint64 id, QString &error)
 	obs_data_set_bool(d, "visible", obs_sceneitem_visible(item));
 	obs_data_set_bool(d, "locked", obs_sceneitem_locked(item));
 	obs_data_set_int(d, "index", obs_sceneitem_get_order_position(item));
-	const std::string json = obs_data_get_json(d);
-	const std::string what = std::string("Remove ") + obs_source_get_name(src) + " (vertical)";
+	std::string json = obs_data_get_json(d);
 	obs_data_release(d);
+	return json;
+}
+
+} // namespace
+
+bool VerticalCanvas::removeItem(const QString &scene, qint64 id, QString &error)
+{
+	WITH_ITEM(scene, id, error)
+	// Saved first, so OBS's Edit -> Undo can bring it back.
+	const std::string json = snapshotOf(s_, item);
+	const std::string what = std::string("Remove ") + obs_source_get_name(obs_sceneitem_get_source(item)) + " (vertical)";
 	obs_sceneitem_remove(item);
 	obs_scene_release(s_);
 	obs_frontend_add_undo_redo_action(what.c_str(), unremove, reremove, json.c_str(), json.c_str(), false);
+	refreshAudio();
+	return true;
+}
+
+void VerticalCanvas::undoableAdd(obs_scene_t *scene, obs_sceneitem_t *item)
+{
+	const std::string json = snapshotOf(scene, item);
+	const std::string what = std::string("Add ") + obs_source_get_name(obs_sceneitem_get_source(item)) + " (vertical)";
+	obs_frontend_add_undo_redo_action(what.c_str(), reremove, unremove, json.c_str(), json.c_str(), false);
+}
+
+int VerticalCanvas::addFiles(const QString &scene, const QStringList &paths, QString &error)
+{
+	obs_scene_t *s = findScene(scene);
+	if (!s) {
+		error = "Add a vertical scene first.";
+		return -1;
+	}
+	static const QStringList PICTURES = {"png", "jpg", "jpeg", "gif", "bmp", "tga", "webp", "psd", "jxr"};
+	static const QStringList MEDIA = {"mp4", "mkv", "mov", "webm", "flv", "avi", "ts", "m4v", "mpg",
+					  "mp3", "wav", "ogg", "flac", "aac", "m4a", "opus"};
+	int added = 0;
+	QStringList skipped;
+	for (const QString &path : paths) {
+		const QFileInfo f(path);
+		const QString ext = f.suffix().toLower();
+		const char *type = PICTURES.contains(ext) ? "image_source"
+				   : MEDIA.contains(ext)  ? "ffmpeg_source"
+				   : ext == "html" || ext == "htm" ? "browser_source"
+								  : nullptr;
+		if (!f.isFile() || !type) {
+			skipped << f.fileName();
+			continue;
+		}
+		const QByteArray file = QDir::toNativeSeparators(f.absoluteFilePath()).toUtf8();
+		obs_data_t *settings = obs_data_create();
+		if (strcmp(type, "image_source") == 0) {
+			obs_data_set_string(settings, "file", file.constData());
+		} else if (strcmp(type, "ffmpeg_source") == 0) {
+			obs_data_set_bool(settings, "is_local_file", true);
+			obs_data_set_string(settings, "local_file", file.constData());
+		} else {
+			obs_data_set_bool(settings, "is_local_file", true);
+			obs_data_set_string(settings, "local_file", file.constData());
+			obs_data_set_int(settings, "width", width_);
+			obs_data_set_int(settings, "height", height_);
+		}
+		const QString name = freeSourceName(f.completeBaseName());
+		obs_source_t *src = obs_source_create(type, name.toUtf8().constData(), settings, nullptr);
+		obs_data_release(settings);
+		obs_sceneitem_t *item = src ? obs_scene_add(s, src) : nullptr;
+		if (item) {
+			placeNew(s, item);
+			undoableAdd(s, item);
+			added++;
+		} else {
+			skipped << f.fileName();
+		}
+		obs_source_release(src);
+	}
+	obs_scene_release(s);
+	if (!skipped.isEmpty())
+		error = "These can't be added (pictures, videos, sounds and .html pages can): " + skipped.join(", ");
+	refreshAudio();
+	return added;
+}
+
+bool VerticalCanvas::copySource(const QString &scene, qint64 id, QString &error)
+{
+	WITH_ITEM(scene, id, error)
+	copiedSource_ = QString::fromUtf8(obs_source_get_uuid(obs_sceneitem_get_source(item)));
+	obs_sceneitem_get_info2(item, &copiedSourceInfo_);
+	obs_sceneitem_get_crop(item, &copiedSourceCrop_);
+	obs_scene_release(s_);
+	return true;
+}
+
+bool VerticalCanvas::pasteSource(const QString &scene, bool duplicate, QString &error)
+{
+	obs_source_t *src = copiedSource_.isEmpty() ? nullptr : obs_get_source_by_uuid(copiedSource_.toUtf8().constData());
+	if (!src) {
+		error = copiedSource_.isEmpty() ? "Copy a source first (right-click it, Copy, or Ctrl+C)."
+						: "The copied source isn't in OBS anymore.";
+		return false;
+	}
+	obs_scene_t *s = findScene(scene);
+	if (!s) {
+		obs_source_release(src);
+		error = "Add a vertical scene first.";
+		return false;
+	}
+	if (duplicate && !obs_scene_from_source(src)) {
+		obs_source_t *copy =
+			obs_source_duplicate(src, freeSourceName(QString::fromUtf8(obs_source_get_name(src))).toUtf8().constData(), false);
+		obs_source_release(src);
+		src = copy;
+	}
+	obs_sceneitem_t *item = src ? obs_scene_add(s, src) : nullptr;
+	if (item) {
+		obs_sceneitem_set_info2(item, &copiedSourceInfo_);
+		obs_sceneitem_set_crop(item, &copiedSourceCrop_);
+		undoableAdd(s, item);
+	}
+	const bool isScene = src && obs_scene_from_source(src);
+	obs_source_release(src);
+	obs_scene_release(s);
+	if (!item) {
+		error = isScene ? "That scene has this one inside it, so it can't go in here." : "OBS couldn't paste it here.";
+		return false;
+	}
 	refreshAudio();
 	return true;
 }
@@ -257,9 +616,10 @@ bool VerticalCanvas::addNewSource(const QString &scene, const QString &typeId, c
 		error = "There's no vertical scene called \"" + scene + "\".";
 		return false;
 	}
-	// A color takes its size from the main canvas (wide); here it starts phone-sized.
+	// A color or a browser page takes its size from the main canvas (wide), or is
+	// 800x600; here it starts phone-sized.
 	obs_data_t *settings = nullptr;
-	if (typeId.startsWith("color_source")) {
+	if (typeId.startsWith("color_source") || typeId == "browser_source") {
 		settings = obs_data_create();
 		obs_data_set_int(settings, "width", width_);
 		obs_data_set_int(settings, "height", height_);
@@ -272,9 +632,11 @@ bool VerticalCanvas::addNewSource(const QString &scene, const QString &typeId, c
 		return false;
 	}
 	obs_sceneitem_t *item = obs_scene_add(s, src);
-	// Fits the frame until it's moved; a new source has no size yet.
-	if (item && (obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO))
-		placeIn(item, 0.0f, 0.0f, float(width_), float(height_), false);
+	// Its own size, centred (scaled once a capture has a size).
+	if (item) {
+		placeNew(s, item);
+		undoableAdd(s, item);
+	}
 	obs_scene_release(s);
 	if (created)
 		*created = obs_source_get_ref(src);

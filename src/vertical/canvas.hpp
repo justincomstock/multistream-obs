@@ -8,7 +8,9 @@ class VerticalRecorder;
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QList>
 #include <QMap>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 
@@ -59,8 +61,10 @@ public:
 	bool duplicateScene(const QString &name, const QString &to, QString &error);
 	bool removeScene(const QString &name, QString &error);
 	bool moveScene(const QString &name, int delta, QString &error);
-	// Adds an existing source to a vertical scene, scaled to fill it.
-	bool addSource(const QString &scene, const QString &source, QString &error);
+	// Adds an existing source to a vertical scene at its own size, centred
+	// (scaled down to the frame's width if wider), as OBS adds one.
+	// `vertical`: `source` is another vertical scene (nested).
+	bool addSource(const QString &scene, const QString &source, QString &error, bool vertical = false);
 
 	// ---- the items in a vertical scene (items.cpp) ----
 	// [{id, name, type, visible, locked, audio, group}], top first.
@@ -78,6 +82,37 @@ public:
 	//  cropLeft, cropTop, cropRight, cropBottom}
 	QJsonObject itemTransform(const QString &scene, qint64 id) const;
 	bool setItemTransform(const QString &scene, qint64 id, const QJsonObject &t, QString &error);
+	// The right-click menu's Transform choices (arrange.cpp), undoable with
+	// Edit -> Undo: "center", "centerH", "centerV", "fit", "fill", "fitWidth",
+	// "reset" (own size, centred), "rotateRight", "rotateLeft", "rotate180",
+	// "flipH", "flipV", "copy", "paste".
+	bool arrangeItem(const QString &scene, qint64 id, const QString &action, QString &error);
+	bool canPasteTransform() const { return copied_; }
+	// An item by id, at the top of the scene or inside one of its groups.
+	static obs_sceneitem_t *itemById(obs_scene_t *scene, qint64 id);
+	// Whether it's inside a group (its position is then in the group's pixels).
+	static bool isInGroup(obs_scene_t *scene, obs_sceneitem_t *item);
+	// ---- more item edits (items.cpp); each is an Edit -> Undo step ----
+	// Renames a source (shared with the main canvas).
+	bool renameSource(obs_source_t *src, const QString &to, QString &error);
+	// Files dropped from Explorer or Finder: pictures, videos and sounds,
+	// .html pages. Returns how many were added; `error` names the rest.
+	int addFiles(const QString &scene, const QStringList &paths, QString &error);
+	// Ctrl+C / Ctrl+V: paste adds the same source (shared) where the copied
+	// one was; `duplicate` makes a separate copy of it instead.
+	bool copySource(const QString &scene, qint64 id, QString &error);
+	bool canPasteSource() const { return !copiedSource_.isEmpty(); }
+	bool pasteSource(const QString &scene, bool duplicate, QString &error);
+	// Puts the scene's items in this order, top first (the list's drag and drop).
+	bool reorderItems(const QString &scene, const QList<qint64> &topFirst, QString &error);
+	// The vertical canvas's own transition: type "" = the same as OBS's;
+	// ms 0 = OBS's duration. Types: "", "cut_transition", "fade_transition".
+	QString transitionChoice() const { return transitionChoice_; }
+	int transitionMs() const { return transitionMs_; }
+	void setTransition(const QString &type, int ms);
+	// Choices the docks remember (vertical.json "ui").
+	int uiInt(const char *key, int def) const;
+	void setUiInt(const char *key, int value);
 	// A new vertical scene laid out for 9:16 from a main scene's items
 	// (sharing their sources): the game or screen fills, a camera takes the
 	// bottom, overlays and text stack where they fit. Editable afterwards.
@@ -127,6 +162,12 @@ private:
 	static void onCanvasCreate(void *data, calldata_t *cd);
 	obs_scene_t *findScene(const QString &name) const; // new reference
 	obs_source_t *findSceneByUuid(const QString &uuid) const; // new reference
+	// A source just added: its own size, centred, scaled down to the frame's
+	// width if wider. One with no size yet (a capture) is scaled once it has one.
+	void placeNew(obs_scene_t *scene, obs_sceneitem_t *item);
+	void placePending(); // every second, from tick()
+	// Makes adding `item` an Edit -> Undo step (items.cpp).
+	void undoableAdd(obs_scene_t *scene, obs_sceneitem_t *item);
 	void showScene(obs_source_t *scene);
 	void followMainScene();
 	void resetVideo();
@@ -156,6 +197,18 @@ private:
 	bool followMain_ = true;
 	quint64 version_ = 1;
 	bool videoWaits_ = false;
+	// placeNew's items still waiting for a size: {scene UUID, item id}.
+	QList<QPair<QString, qint64>> pending_;
+	// Copy transform's copy, for Paste transform.
+	bool copied_ = false;
+	struct obs_transform_info copiedInfo_ = {};
+	struct obs_sceneitem_crop copiedCrop_ = {};
+	// Copy (Ctrl+C)'s source and where it was, for Paste (Ctrl+V).
+	QString copiedSource_; // UUID
+	struct obs_transform_info copiedSourceInfo_ = {};
+	struct obs_sceneitem_crop copiedSourceCrop_ = {};
+	QString transitionChoice_;
+	int transitionMs_ = 0;
 	// vertical.json: {width, height, followMain,
 	//   collections: {name: {scene, order: [{uuid}], links: [{main, vertical}], audio}}}
 	obs_data_t *config_ = nullptr;

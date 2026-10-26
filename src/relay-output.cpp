@@ -187,6 +187,10 @@ bool RelayOutput::build()
 	obs_data_set_string(vs, "preset", "veryfast"); // x264
 	obs_data_set_string(vs, "preset2", "p5");      // NVENC
 	for (const Enc &e : ENCODERS) {
+		// OBS hands back a placeholder for an id it doesn't have (NVENC on a
+		// Mac), so only try encoders this OBS actually registered.
+		if (!obs_get_encoder_codec(e.id))
+			continue;
 		venc_ = obs_video_encoder_create(e.id, (name + " video").constData(), vs, nullptr);
 		if (venc_) {
 			encoder_ = e.label;
@@ -203,9 +207,8 @@ bool RelayOutput::build()
 
 	obs_data_t *as = obs_data_create();
 	obs_data_set_int(as, "bitrate", 160);
-	aenc_ = obs_audio_encoder_create("ffmpeg_aac", (name + " audio").constData(), as, 0, nullptr);
-	if (!aenc_)
-		aenc_ = obs_audio_encoder_create("CoreAudio_AAC", (name + " audio").constData(), as, 0, nullptr);
+	const char *aac = obs_get_encoder_codec("ffmpeg_aac") ? "ffmpeg_aac" : "CoreAudio_AAC";
+	aenc_ = obs_audio_encoder_create(aac, (name + " audio").constData(), as, 0, nullptr);
 	obs_data_release(as);
 	if (!aenc_) {
 		error_ = "No AAC audio encoder could be made.";
