@@ -971,7 +971,7 @@ QJsonObject VerticalCanvas::audioState() const
 			QJsonObject w;
 			w["uuid"] = uuid;
 			w["name"] = QString::fromUtf8(obs_source_get_name(src));
-			w["monitorOnly"] = obs_source_get_monitoring_type(src) == OBS_MONITORING_TYPE_MONITOR_ONLY;
+			w["monitorOnly"] = isMonitorOnly(src);
 			w["mode"] = st.own ? "own" : "same";
 			w["volume"] = st.volume;
 			w["muted"] = st.muted;

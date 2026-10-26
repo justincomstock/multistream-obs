@@ -1,5 +1,17 @@
 #include "audio-mix.hpp"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 #include <obs-module.h>
 #include <plugin-support.h>
 
@@ -107,11 +119,34 @@ void VerticalAudio::setSources(const std::vector<obs_source_t *> &sources)
 	}
 }
 
+// OBS 33's monitoring switch, looked up at run time: the plugin builds
+// against OBS 31.1, and on 33 the old type getter logs a deprecation warning
+// on every call (this runs for every block of sound).
+using MonitoringEnabledFn = bool (*)(const obs_source_t *);
+static MonitoringEnabledFn monitoringEnabled()
+{
+#ifdef _WIN32
+	static const auto fn = reinterpret_cast<MonitoringEnabledFn>(
+		GetProcAddress(GetModuleHandleW(L"obs.dll"), "obs_source_get_monitoring_enabled"));
+#else
+	static const auto fn =
+		reinterpret_cast<MonitoringEnabledFn>(dlsym(RTLD_DEFAULT, "obs_source_get_monitoring_enabled"));
+#endif
+	return fn;
+}
+
+bool isMonitorOnly(obs_source_t *source)
+{
+	if (MonitoringEnabledFn enabled = monitoringEnabled())
+		return enabled(source) && obs_source_muted(source);
+	return obs_source_get_monitoring_type(source) == OBS_MONITORING_TYPE_MONITOR_ONLY;
+}
+
 float VerticalAudio::gainFor(obs_source_t *source, const Input &in, bool muted) const
 {
 	// "Monitor only": the streamer hears it, the stream doesn't (music they can't
 	// stream, for example). OBS's main mix leaves it out too.
-	if (obs_source_get_monitoring_type(source) == OBS_MONITORING_TYPE_MONITOR_ONLY)
+	if (isMonitorOnly(source))
 		return 0.0f;
 	std::lock_guard<std::mutex> lock(settingsMutex_);
 	auto it = settings_.find(in.uuid);
@@ -264,7 +299,7 @@ QJsonArray VerticalAudio::state() const
 		bool monitorOnly = false;
 		if (obs_source_t *src = obs_weak_source_get_source(in->weak)) {
 			name = QString::fromUtf8(obs_source_get_name(src));
-			monitorOnly = obs_source_get_monitoring_type(src) == OBS_MONITORING_TYPE_MONITOR_ONLY;
+			monitorOnly = isMonitorOnly(src);
 			obs_source_release(src);
 		}
 		o["name"] = name;

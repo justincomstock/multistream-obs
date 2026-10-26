@@ -14,6 +14,12 @@
 #include <string>
 #include <vector>
 
+// OBS's "Monitor only": the streamer hears it, the stream doesn't. Up to OBS
+// 32 that's its own monitoring type; OBS 33 dropped the type for an on/off
+// switch, and Monitor only became monitoring on plus muted (monitoring
+// ignores mute there).
+bool isMonitorOnly(obs_source_t *source);
+
 // The vertical canvas's own sound, separate from OBS's main mix (Aitum
 // Vertical sums both canvases into OBS's tracks, so whatever plays in one
 // goes out on the other).
