@@ -1,6 +1,7 @@
 // The items in a vertical scene: listing, show/hide, lock, order, new
 // sources, transforms, and a 9:16 layout made from a main scene.
 #include "canvas.hpp"
+#include "../i18n.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -168,7 +169,7 @@ QJsonArray VerticalCanvas::sceneItems(const QString &scene) const
 	obs_sceneitem_t *item = itemIn(s_, id);                                        \
 	if (!item) {                                                                   \
 		obs_scene_release(s_);                                                 \
-		error = "That source isn't in the vertical scene \"" + scene + "\"."; \
+		error = mt("Vertical.SourceNotInScene").arg(scene);                       \
 		return false;                                                          \
 	}
 
@@ -320,7 +321,7 @@ bool VerticalCanvas::moveItem(const QString &scene, qint64 id, int movement, QSt
 	if (top) {
 		const std::string after = orderData(s_);
 		if (after != before)
-			obs_frontend_add_undo_redo_action("Reorder vertical sources", loadOrder, loadOrder, before.c_str(),
+			obs_frontend_add_undo_redo_action(mt("Vertical.UndoReorder").toUtf8().constData(), loadOrder, loadOrder, before.c_str(),
 							  after.c_str(), false);
 	}
 	obs_scene_release(s_);
@@ -331,7 +332,7 @@ bool VerticalCanvas::reorderItems(const QString &scene, const QList<qint64> &top
 {
 	obs_scene_t *s = findScene(scene);
 	if (!s) {
-		error = "There's no vertical scene called \"" + scene + "\".";
+		error = mt("Vertical.NoScene").arg(scene);
 		return false;
 	}
 	std::vector<obs_sceneitem_t *> order; // bottom first
@@ -343,7 +344,7 @@ bool VerticalCanvas::reorderItems(const QString &scene, const QList<qint64> &top
 		obs_sceneitem_set_order_position(order[i], int(i));
 	const std::string after = orderData(s);
 	if (after != before)
-		obs_frontend_add_undo_redo_action("Reorder vertical sources", loadOrder, loadOrder, before.c_str(),
+		obs_frontend_add_undo_redo_action(mt("Vertical.UndoReorder").toUtf8().constData(), loadOrder, loadOrder, before.c_str(),
 						  after.c_str(), false);
 	obs_scene_release(s);
 	return true;
@@ -354,19 +355,19 @@ bool VerticalCanvas::renameSource(obs_source_t *src, const QString &to, QString 
 	const QString name = to.trimmed();
 	const QString old = QString::fromUtf8(obs_source_get_name(src));
 	if (name.isEmpty()) {
-		error = "Give the source a name.";
+		error = mt("Vertical.NeedSourceName");
 		return false;
 	}
 	if (name == old)
 		return true;
 	if (obs_source_t *have = obs_get_source_by_name(name.toUtf8().constData())) {
 		obs_source_release(have);
-		error = "There's already a source called \"" + name + "\".";
+		error = mt("Vertical.SourceNameTaken").arg(name);
 		return false;
 	}
 	const std::string undo = nameData(src, old), redo = nameData(src, name);
 	obs_source_set_name(src, name.toUtf8().constData());
-	const std::string label = "Rename " + old.toStdString() + " (vertical)";
+	const std::string label = mt("Vertical.UndoRename").arg(old).toStdString();
 	obs_frontend_add_undo_redo_action(label.c_str(), loadName, loadName, undo.c_str(), redo.c_str(), false);
 	changed();
 	return true;
@@ -480,7 +481,8 @@ bool VerticalCanvas::removeItem(const QString &scene, qint64 id, QString &error)
 	WITH_ITEM(scene, id, error)
 	// Saved first, so OBS's Edit -> Undo can bring it back.
 	const std::string json = snapshotOf(s_, item);
-	const std::string what = std::string("Remove ") + obs_source_get_name(obs_sceneitem_get_source(item)) + " (vertical)";
+	const std::string what =
+		mt("Vertical.UndoRemove").arg(QString::fromUtf8(obs_source_get_name(obs_sceneitem_get_source(item)))).toStdString();
 	obs_sceneitem_remove(item);
 	obs_scene_release(s_);
 	obs_frontend_add_undo_redo_action(what.c_str(), unremove, reremove, json.c_str(), json.c_str(), false);
@@ -491,7 +493,8 @@ bool VerticalCanvas::removeItem(const QString &scene, qint64 id, QString &error)
 void VerticalCanvas::undoableAdd(obs_scene_t *scene, obs_sceneitem_t *item)
 {
 	const std::string json = snapshotOf(scene, item);
-	const std::string what = std::string("Add ") + obs_source_get_name(obs_sceneitem_get_source(item)) + " (vertical)";
+	const std::string what =
+		mt("Vertical.UndoAdd").arg(QString::fromUtf8(obs_source_get_name(obs_sceneitem_get_source(item)))).toStdString();
 	obs_frontend_add_undo_redo_action(what.c_str(), reremove, unremove, json.c_str(), json.c_str(), false);
 }
 
@@ -499,7 +502,7 @@ int VerticalCanvas::addFiles(const QString &scene, const QStringList &paths, QSt
 {
 	obs_scene_t *s = findScene(scene);
 	if (!s) {
-		error = "Add a vertical scene first.";
+		error = mt("Vertical.AddSceneFirst");
 		return -1;
 	}
 	static const QStringList PICTURES = {"png", "jpg", "jpeg", "gif", "bmp", "tga", "webp", "psd", "jxr"};
@@ -546,7 +549,7 @@ int VerticalCanvas::addFiles(const QString &scene, const QStringList &paths, QSt
 	}
 	obs_scene_release(s);
 	if (!skipped.isEmpty())
-		error = "These can't be added (pictures, videos, sounds and .html pages can): " + skipped.join(", ");
+		error = mt("Vertical.CantAddFiles").arg(skipped.join(", "));
 	refreshAudio();
 	return added;
 }
@@ -565,14 +568,13 @@ bool VerticalCanvas::pasteSource(const QString &scene, bool duplicate, QString &
 {
 	obs_source_t *src = copiedSource_.isEmpty() ? nullptr : obs_get_source_by_uuid(copiedSource_.toUtf8().constData());
 	if (!src) {
-		error = copiedSource_.isEmpty() ? "Copy a source first (right-click it, Copy, or Ctrl+C)."
-						: "The copied source isn't in OBS anymore.";
+		error = copiedSource_.isEmpty() ? mt("Vertical.CopyFirst") : mt("Vertical.CopiedGone");
 		return false;
 	}
 	obs_scene_t *s = findScene(scene);
 	if (!s) {
 		obs_source_release(src);
-		error = "Add a vertical scene first.";
+		error = mt("Vertical.AddSceneFirst");
 		return false;
 	}
 	if (duplicate && !obs_scene_from_source(src)) {
@@ -591,7 +593,7 @@ bool VerticalCanvas::pasteSource(const QString &scene, bool duplicate, QString &
 	obs_source_release(src);
 	obs_scene_release(s);
 	if (!item) {
-		error = isScene ? "That scene has this one inside it, so it can't go in here." : "OBS couldn't paste it here.";
+		error = isScene ? mt("Vertical.PasteSceneLoop") : mt("Vertical.CantPaste");
 		return false;
 	}
 	refreshAudio();
@@ -603,17 +605,17 @@ bool VerticalCanvas::addNewSource(const QString &scene, const QString &typeId, c
 {
 	const QString n = name.trimmed();
 	if (n.isEmpty()) {
-		error = "Give the source a name.";
+		error = mt("Vertical.NeedSourceName");
 		return false;
 	}
 	if (obs_source_t *have = obs_get_source_by_name(n.toUtf8().constData())) {
 		obs_source_release(have);
-		error = "There's already a source called \"" + n + "\". Add it with \"Add existing\".";
+		error = mt("Vertical.SourceExists").arg(n);
 		return false;
 	}
 	obs_scene_t *s = findScene(scene);
 	if (!s) {
-		error = "There's no vertical scene called \"" + scene + "\".";
+		error = mt("Vertical.NoScene").arg(scene);
 		return false;
 	}
 	// A color or a browser page takes its size from the main canvas (wide), or is
@@ -628,7 +630,7 @@ bool VerticalCanvas::addNewSource(const QString &scene, const QString &typeId, c
 	obs_data_release(settings);
 	if (!src) {
 		obs_scene_release(s);
-		error = "OBS couldn't make that kind of source.";
+		error = mt("Vertical.CantMakeSource");
 		return false;
 	}
 	obs_sceneitem_t *item = obs_scene_add(s, src);
@@ -716,7 +718,7 @@ bool VerticalCanvas::createFromMain(const QString &main, const QString &name, QS
 	obs_scene_t *mainScene = mainSrc ? obs_scene_from_source(mainSrc) : nullptr;
 	if (!mainScene) {
 		obs_source_release(mainSrc);
-		error = "There's no main scene called \"" + main + "\".";
+		error = mt("Vertical.NoMainScene").arg(main);
 		return false;
 	}
 	if (!createScene(name, error)) {

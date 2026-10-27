@@ -5,6 +5,7 @@
 //     vertical scene per main scene, framed the same way, followed
 //     automatically by name.
 #include "canvas.hpp"
+#include "../i18n.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -107,12 +108,12 @@ QJsonObject VerticalCanvas::importState() const
 int VerticalCanvas::importAitum(QString &error)
 {
 	if (!canvas_) {
-		error = "The vertical canvas isn't ready yet.";
+		error = mt("Vertical.NotReady");
 		return -1;
 	}
 	obs_canvas_t *c = aitumCanvas();
 	if (!c) {
-		error = "No Aitum Vertical scenes were found in this scene collection.";
+		error = mt("Vertical.NoAitumScenes");
 		return -1;
 	}
 	std::vector<obs_source_t *> scenes;
@@ -140,7 +141,7 @@ int VerticalCanvas::importAitum(QString &error)
 	}
 	obs_canvas_release(c);
 	if (!count) {
-		error = "Aitum Vertical has no scenes to import.";
+		error = mt("Vertical.AitumEmpty");
 		return -1;
 	}
 	removeIfEmpty(FIRST_SCENE_NAME);
@@ -159,14 +160,14 @@ int VerticalCanvas::importAitum(QString &error)
 int VerticalCanvas::importLuaTool(const QString &framing, int position, QString &error)
 {
 	if (!canvas_) {
-		error = "The vertical canvas isn't ready yet.";
+		error = mt("Vertical.NotReady");
 		return -1;
 	}
 	struct obs_video_info ovi = {};
 	obs_get_video_info(&ovi);
 	const float sw = float(ovi.base_width), sh = float(ovi.base_height);
 	if (sw <= 0 || sh <= 0) {
-		error = "OBS's video isn't ready yet.";
+		error = mt("Relay.VideoNotReady");
 		return -1;
 	}
 	const float W = float(width_), H = float(height_);
@@ -210,7 +211,7 @@ int VerticalCanvas::importLuaTool(const QString &framing, int position, QString 
 		followMainScene();
 	}
 	if (!count && !have.isEmpty())
-		error = "Every main scene already has a vertical scene with its name.";
+		error = mt("Vertical.AllHaveScenes");
 	obs_log(LOG_INFO, "vertical: made %d scenes from the Vertical tool's framing (%s, %d)", count,
 		framing.toUtf8().constData(), position);
 	save();
@@ -235,16 +236,16 @@ QJsonObject VerticalCanvas::dualFormatState() const
 bool VerticalCanvas::setDualFormat(bool on, QString &error)
 {
 	if (!canvas_) {
-		error = "The vertical canvas isn't ready yet.";
+		error = mt("Vertical.NotReady");
 		return false;
 	}
 	if (obs_frontend_streaming_active()) {
-		error = "Change this after the stream ends.";
+		error = mt("Vertical.ChangeAfterStream");
 		return false;
 	}
 	config_t *cfg = obs_frontend_get_profile_config();
 	if (!cfg) {
-		error = "OBS's profile isn't loaded.";
+		error = mt("Vertical.NoProfile");
 		return false;
 	}
 	config_set_string(cfg, "Stream1", "MultitrackExtraCanvas", on ? obs_canvas_get_uuid(canvas_) : "");

@@ -1,5 +1,7 @@
 #include "obs-state.hpp"
 
+#include "i18n.hpp"
+
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/config-file.h>
@@ -158,7 +160,7 @@ QString serviceLabel(obs_data_t *settings)
 	if (!name.isEmpty())
 		return name;
 	const QString host = hostOf(str(obs_data_get_string(settings, "server")));
-	return host.isEmpty() ? QString("your old stream setting") : host;
+	return host.isEmpty() ? mt("Obs.OldSetting") : host;
 }
 
 void loadPrevious()
@@ -380,11 +382,11 @@ QJsonObject obsstate::snapshot()
 bool obsstate::setService(const QString &server, const QString &key, QString &error)
 {
 	if (obs_frontend_streaming_active()) {
-		error = "End the stream first.";
+		error = mt("Obs.EndStreamFirst");
 		return false;
 	}
 	if (server.isEmpty() || key.isEmpty()) {
-		error = "The server or stream key is missing.";
+		error = mt("Obs.ServerKeyMissing");
 		return false;
 	}
 	const QByteArray srv = server.toUtf8(), k = key.toUtf8();
@@ -416,7 +418,7 @@ bool obsstate::setService(const QString &server, const QString &key, QString &er
 	obs_service_t *svc = obs_service_create("rtmp_custom", "default_service", s, nullptr);
 	obs_data_release(s);
 	if (!svc) {
-		error = "OBS couldn't make a Custom stream service.";
+		error = mt("Obs.NoCustomService");
 		return false;
 	}
 	obs_frontend_set_streaming_service(svc);
@@ -428,12 +430,12 @@ bool obsstate::setService(const QString &server, const QString &key, QString &er
 bool obsstate::setEncoder(int bitrate, int keyintSec, QString &error)
 {
 	if (obs_frontend_streaming_active()) {
-		error = "End the stream first.";
+		error = mt("Obs.EndStreamFirst");
 		return false;
 	}
 	config_t *cfg = obs_frontend_get_profile_config();
 	if (!cfg) {
-		error = "OBS has no profile open.";
+		error = mt("Obs.NoProfile");
 		return false;
 	}
 	if (!advancedMode(cfg)) {
@@ -453,21 +455,21 @@ bool obsstate::setEncoder(int bitrate, int keyintSec, QString &error)
 	const bool ok = obs_data_save_json_safe(js, path.constData(), "tmp", "bak");
 	obs_data_release(js);
 	if (!ok)
-		error = "OBS's encoder settings couldn't be saved.";
+		error = mt("Obs.EncoderNotSaved");
 	return ok;
 }
 
 bool obsstate::restoreService(QString &error)
 {
 	if (obs_frontend_streaming_active()) {
-		error = "End the stream first.";
+		error = mt("Obs.EndStreamFirst");
 		return false;
 	}
 	const QString path = configFile("previous-service.json");
 	const QByteArray file = path.toUtf8();
 	obs_data_t *d = obs_data_create_from_json_file_safe(file.constData(), "bak");
 	if (!d) {
-		error = "There's no earlier stream setting to put back.";
+		error = mt("Obs.NoEarlierSetting");
 		return false;
 	}
 	obs_data_t *s = obs_data_get_obj(d, "settings");
@@ -477,7 +479,7 @@ bool obsstate::restoreService(QString &error)
 		obs_data_release(s);
 	obs_data_release(d);
 	if (!svc) {
-		error = "OBS couldn't bring back the earlier stream setting. Set it in OBS: Settings, Stream.";
+		error = mt("Obs.CantRestore");
 		return false;
 	}
 	obs_frontend_set_streaming_service(svc);

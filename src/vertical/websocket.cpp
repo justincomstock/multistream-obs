@@ -1,6 +1,7 @@
 #include "websocket.hpp"
 
 #include "canvas.hpp"
+#include "../i18n.hpp"
 #include "docks.hpp"
 #include "record.hpp"
 #include "../relay-output.hpp"
@@ -80,7 +81,7 @@ qint64 itemOf(const QJsonObject &in, QString &error)
 	for (const QJsonValue v : canvas->sceneItems(sceneOf(in)))
 		if (v.toObject().value("name").toString() == source)
 			return qint64(v.toObject().value("id").toDouble());
-	error = QString("No source called \"%1\" in vertical scene \"%2\".").arg(source, sceneOf(in));
+	error = mt("Vertical.NoSourceInScene").arg(source, sceneOf(in));
 	return 0;
 }
 
@@ -400,12 +401,12 @@ void onRequest(obs_data_t *request, obs_data_t *response, void *priv)
 {
 	const Request *r = static_cast<const Request *>(priv);
 	if (!alive.load()) {
-		reply(response, fail("OBS is closing."));
+		reply(response, fail(mt("Obs.Closing")));
 		return;
 	}
 	const QJsonObject in = toJson(request);
 	QJsonObject out;
-	onUi([&]() { out = alive.load() ? r->handler(in) : fail("OBS is closing."); });
+	onUi([&]() { out = alive.load() ? r->handler(in) : fail(mt("Obs.Closing")); });
 	reply(response, out);
 }
 

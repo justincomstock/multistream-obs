@@ -1,6 +1,7 @@
 #include "record.hpp"
 
 #include "canvas.hpp"
+#include "../i18n.hpp"
 #include "../obs-state.hpp"
 
 #include <obs-module.h>
@@ -134,7 +135,7 @@ void VerticalRecorder::load()
 void VerticalRecorder::registerHotkeys()
 {
 	hkRecord_ = obs_hotkey_register_frontend(
-		"multistream_vertical_record", "Multistream: Start / stop vertical recording",
+		"multistream_vertical_record", obs_module_text("Vertical.HotkeyRecord"),
 		[](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
 			if (!pressed)
 				return;
@@ -149,7 +150,7 @@ void VerticalRecorder::registerHotkeys()
 		},
 		this);
 	hkReplay_ = obs_hotkey_register_frontend(
-		"multistream_vertical_replay", "Multistream: Start / stop vertical replay buffer",
+		"multistream_vertical_replay", obs_module_text("Vertical.HotkeyReplay"),
 		[](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
 			if (!pressed)
 				return;
@@ -164,7 +165,7 @@ void VerticalRecorder::registerHotkeys()
 		},
 		this);
 	hkSave_ = obs_hotkey_register_frontend(
-		"multistream_vertical_save", "Multistream: Save vertical replay",
+		"multistream_vertical_save", obs_module_text("Vertical.HotkeySave"),
 		[](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
 			if (!pressed)
 				return;
@@ -173,7 +174,7 @@ void VerticalRecorder::registerHotkeys()
 				// A hotkey press shows nothing by itself: say when it didn't work.
 				QString error;
 				if (!self->saveReplay(error))
-					self->notify("No clip saved: " + error);
+					self->notify(mt("Vertical.NoticeNoClip").arg(error));
 			});
 		},
 		this);
@@ -235,7 +236,7 @@ void VerticalRecorder::notify(const QString &text, const QString &file)
 bool VerticalRecorder::encoders(QString &error)
 {
 	if (!canvas_->ready() || !canvas_->audio()) {
-		error = "The vertical canvas isn't ready yet.";
+		error = mt("Vertical.NotReady");
 		return false;
 	}
 	// Rebuilt only while nothing records (a new picture size, or a new canvas).
@@ -272,7 +273,7 @@ bool VerticalRecorder::encoders(QString &error)
 	aenc_ = obs_audio_encoder_create(aac, "Multistream vertical recording audio", as, 0, nullptr);
 	obs_data_release(as);
 	if (!venc_ || !aenc_) {
-		error = "No encoder could be made for the vertical recording.";
+		error = mt("Vertical.NoRecEncoder");
 		obs_encoder_release(venc_);
 		obs_encoder_release(aenc_);
 		venc_ = aenc_ = nullptr;
@@ -314,7 +315,7 @@ void VerticalRecorder::onRecordStop(void *data, calldata_t *cd)
 	const char *last = out ? obs_output_get_last_error(out) : nullptr;
 	const QString err = code == 0 ? QString()
 				      : (last && *last ? QString::fromUtf8(last)
-						       : QString("The vertical recording stopped (code %1).").arg(code));
+						       : mt("Vertical.RecStopped").arg(code));
 	onUi([self, err]() {
 		self->error_ = err;
 		if (!err.isEmpty())
@@ -339,7 +340,7 @@ void VerticalRecorder::onReplaySaved(void *data, calldata_t *)
 		if (proc_handler_call(ph, "get_last_replay", &cd)) {
 			const char *p = calldata_string(&cd, "path");
 			self->lastReplay_ = p ? QString::fromUtf8(p) : QString();
-			self->notify("Clip saved", self->lastReplay_);
+			self->notify(mt("Vertical.NoticeClipSaved"), self->lastReplay_);
 			obs_log(LOG_INFO, "vertical: replay saved to %s", p ? p : "?");
 		}
 		calldata_free(&cd);
@@ -384,7 +385,7 @@ bool VerticalRecorder::startRecording(QString &error)
 		record_ = obs_output_create("ffmpeg_muxer", "Multistream vertical recording", s, nullptr);
 	obs_data_release(s);
 	if (!record_) {
-		error = error_ = "OBS couldn't make the vertical recording.";
+		error = error_ = mt("Vertical.CantMakeRec");
 		return false;
 	}
 	obs_output_set_video_encoder(record_, venc_);
@@ -392,7 +393,7 @@ bool VerticalRecorder::startRecording(QString &error)
 	signal_handler_connect(obs_output_get_signal_handler(record_), "stop", onRecordStop, this);
 	if (!obs_output_start(record_)) {
 		const char *last = obs_output_get_last_error(record_);
-		error = error_ = last && *last ? QString::fromUtf8(last) : "The vertical recording didn't start.";
+		error = error_ = last && *last ? QString::fromUtf8(last) : mt("Vertical.RecNoStart");
 		releaseEncodersIfIdle();
 		return false;
 	}
@@ -416,13 +417,13 @@ bool VerticalRecorder::paused() const
 bool VerticalRecorder::setPaused(bool on, QString &error)
 {
 	if (!active(record_)) {
-		error = "The vertical recording isn't running.";
+		error = mt("Vertical.RecNotRunning");
 		return false;
 	}
 	if (obs_output_paused(record_) == on)
 		return true;
 	if (!obs_output_pause(record_, on)) {
-		error = on ? "This recording can't be paused." : "The vertical recording couldn't carry on.";
+		error = mt(on ? "Vertical.RecCantPause" : "Vertical.RecCantResume");
 		return false;
 	}
 	return true;
@@ -448,7 +449,7 @@ bool VerticalRecorder::startReplay(QString &error)
 	replay_ = obs_output_create("replay_buffer", "Multistream vertical replay buffer", s, nullptr);
 	obs_data_release(s);
 	if (!replay_) {
-		error = error_ = "OBS couldn't make the vertical replay buffer.";
+		error = error_ = mt("Vertical.CantMakeReplay");
 		return false;
 	}
 	obs_output_set_video_encoder(replay_, venc_);
@@ -458,7 +459,7 @@ bool VerticalRecorder::startReplay(QString &error)
 	signal_handler_connect(sh, "saved", onReplaySaved, this);
 	if (!obs_output_start(replay_)) {
 		const char *last = obs_output_get_last_error(replay_);
-		error = error_ = last && *last ? QString::fromUtf8(last) : "The vertical replay buffer didn't start.";
+		error = error_ = last && *last ? QString::fromUtf8(last) : mt("Vertical.ReplayNoStart");
 		releaseEncodersIfIdle();
 		return false;
 	}
@@ -475,7 +476,7 @@ void VerticalRecorder::stopReplay()
 bool VerticalRecorder::saveReplay(QString &error)
 {
 	if (!replayActive()) {
-		error = "The vertical replay buffer isn't running.";
+		error = mt("Vertical.ReplayNotRunning");
 		return false;
 	}
 	calldata_t cd = {};
@@ -530,9 +531,7 @@ void VerticalRecorder::onFrontendEvent(int event)
 			onUi([this, rec, rep]() {
 				QString error;
 				const bool ok = (!rec || startRecording(error)) && (!rep || startReplay(error));
-				notify(ok ? QString("Switching scene collections stopped the vertical recording for a moment: it "
-						    "carries on in a new file.")
-					  : "Switching scene collections stopped the vertical recording: " + error);
+				notify(ok ? mt("Vertical.NoticeCollectionOk") : mt("Vertical.NoticeCollectionFail").arg(error));
 			});
 		}
 		break;

@@ -1,5 +1,7 @@
 #include "relay-output.hpp"
 
+#include "i18n.hpp"
+
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
@@ -33,21 +35,21 @@ QString stopReason(long long code)
 {
 	switch (code) {
 	case -1:
-		return "The Multistream address is wrong.";
+		return mt("Relay.StopAddress");
 	case -2:
-		return "Couldn't reach Multistream.";
+		return mt("Relay.StopUnreachable");
 	case -3:
-		return "Multistream turned the stream away.";
+		return mt("Relay.StopRefused");
 	case -4:
-		return "The Multistream output hit an error.";
+		return mt("Relay.StopError");
 	case -5:
-		return "Lost the connection to Multistream.";
+		return mt("Relay.StopDisconnected");
 	case -6:
-		return "This encoder can't be used for the Multistream output.";
+		return mt("Relay.StopEncoderUnusable");
 	case -8:
-		return "The encoder failed.";
+		return mt("Relay.StopEncoderFailed");
 	default:
-		return QString("The Multistream output stopped (code %1).").arg(code);
+		return mt("Relay.StopCode").arg(code);
 	}
 }
 
@@ -165,7 +167,7 @@ bool RelayOutput::build()
 	video_t *video = video_();
 	audio_t *audio = audio_();
 	if (!video || !audio) {
-		error_ = feed_ == "vertical" ? "The vertical canvas isn't ready yet." : "OBS's video isn't ready yet.";
+		error_ = feed_ == "vertical" ? mt("Relay.VerticalNotReady") : mt("Relay.VideoNotReady");
 		return false;
 	}
 	const QByteArray name = name_.toUtf8();
@@ -199,7 +201,7 @@ bool RelayOutput::build()
 	}
 	obs_data_release(vs);
 	if (!venc_ || !service_) {
-		error_ = "No video encoder could be made for the Multistream output.";
+		error_ = mt("Relay.NoVideoEncoder");
 		releaseAll();
 		return false;
 	}
@@ -211,7 +213,7 @@ bool RelayOutput::build()
 	aenc_ = obs_audio_encoder_create(aac, (name + " audio").constData(), as, 0, nullptr);
 	obs_data_release(as);
 	if (!aenc_) {
-		error_ = "No AAC audio encoder could be made.";
+		error_ = mt("Relay.NoAudioEncoder");
 		releaseAll();
 		return false;
 	}
@@ -219,7 +221,7 @@ bool RelayOutput::build()
 
 	output_ = obs_output_create("rtmp_output", name.constData(), nullptr, nullptr);
 	if (!output_) {
-		error_ = "OBS couldn't make the Multistream output.";
+		error_ = mt("Relay.NoOutput");
 		releaseAll();
 		return false;
 	}
@@ -252,7 +254,7 @@ bool RelayOutput::startOutput()
 	if (!obs_output_start(output_)) {
 		attempting_ = false;
 		const char *err = obs_output_get_last_error(output_);
-		error_ = err && *err ? QString::fromUtf8(err) : QString("OBS couldn't start the Multistream output.");
+		error_ = err && *err ? QString::fromUtf8(err) : mt("Relay.CantStart");
 		obs_log(LOG_WARNING, "Multistream output didn't start: %s", error_.toUtf8().constData());
 		return false;
 	}
@@ -264,7 +266,7 @@ bool RelayOutput::startOutput()
 bool RelayOutput::startNow()
 {
 	if (!enabled_) {
-		error_ = "Add the Multistream server and stream key first.";
+		error_ = mt("Relay.AddKeyFirst");
 		return false;
 	}
 	manual_ = true;
@@ -359,7 +361,7 @@ void RelayOutput::onStop(void *data, calldata_t *cd)
 			if (!detail.isEmpty())
 				self->error_ += " " + detail;
 			if (self->wanted_)
-				self->error_ += " Trying again every 5 seconds.";
+				self->error_ += " " + mt("Relay.RetryEvery");
 		}
 	});
 }

@@ -1,6 +1,7 @@
 #include "item-menu.hpp"
 
 #include "canvas.hpp"
+#include "../i18n.hpp"
 
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
@@ -71,7 +72,7 @@ void renameSource(QWidget *parent, VerticalCanvas *canvas, obs_source_t *src)
 {
 	bool given = false;
 	const QString old = QString::fromUtf8(obs_source_get_name(src));
-	const QString to = QInputDialog::getText(parent, "Rename source", "Name (it's the same source on the main canvas):",
+	const QString to = QInputDialog::getText(parent, mt("Vertical.RenameSourceTitle"), mt("Vertical.RenameSourceLabel"),
 						 QLineEdit::Normal, old, &given)
 				   .trimmed();
 	if (!given || to.isEmpty() || to == old)
@@ -88,9 +89,7 @@ bool askRemove(QWidget *parent, VerticalCanvas *canvas, qint64 id)
 		return false;
 	const QString name = QString::fromUtf8(obs_source_get_name(src));
 	obs_source_release(src);
-	if (QMessageBox::question(parent, TITLE,
-				  "Remove \"" + name + "\" from this vertical scene? It stays in OBS.\n\nEdit → Undo puts it back.") !=
-	    QMessageBox::Yes)
+	if (QMessageBox::question(parent, TITLE, mt("Vertical.AskRemove").arg(name)) != QMessageBox::Yes)
 		return false;
 	QString error;
 	if (!canvas->removeItem(canvas->currentScene(), id, error)) {
@@ -111,8 +110,8 @@ void addPasteActions(QMenu &menu, VerticalCanvas *canvas, QWidget *parent)
 				QMessageBox::warning(parent, TITLE, error);
 		};
 	};
-	menu.addAction("Paste (Ctrl+V)", paste(false))->setToolTip("The same source again: changing one changes both.");
-	menu.addAction("Paste (duplicate)", paste(true))->setToolTip("A separate copy you can change on its own.");
+	menu.addAction(mt("Vertical.PasteLinked"), paste(false))->setToolTip(mt("Vertical.PasteLinkedTip"));
+	menu.addAction(mt("Vertical.PasteCopy"), paste(true))->setToolTip(mt("Vertical.PasteCopyTip"));
 }
 
 void addItemMenu(QMenu &menu, VerticalCanvas *canvas, qint64 id, QWidget *parent, std::function<void()> removed)
@@ -156,25 +155,25 @@ void addItemMenu(QMenu &menu, VerticalCanvas *canvas, qint64 id, QWidget *parent
 		};
 	};
 
-	menu.addAction("Properties…", withSource(obs_frontend_open_source_properties));
-	menu.addAction("Filters…", withSource(obs_frontend_open_source_filters));
-	menu.addAction("Rename…", [canvas, id, parent]() {
+	menu.addAction(mt("Vertical.Properties"), withSource(obs_frontend_open_source_properties));
+	menu.addAction(mt("Vertical.Filters"), withSource(obs_frontend_open_source_filters));
+	menu.addAction(mt("Vertical.Rename"), [canvas, id, parent]() {
 		if (obs_source_t *src = sourceOf(canvas, id)) {
 			renameSource(parent, canvas, src);
 			obs_source_release(src);
 		}
 	});
 	if (flags & OBS_SOURCE_INTERACTION)
-		menu.addAction("Interact…", withSource(obs_frontend_open_source_interaction));
+		menu.addAction(mt("Vertical.Interact"), withSource(obs_frontend_open_source_interaction));
 	menu.addSeparator();
 
 	if (!grouped) {
-		menu.addAction("Copy (Ctrl+C)", [canvas, scene, id, parent]() {
+		menu.addAction(mt("Vertical.CopyCtrl"), [canvas, scene, id, parent]() {
 			QString error;
 			if (!canvas->copySource(scene, id, error))
 				QMessageBox::warning(parent, TITLE, error);
 		});
-		menu.addAction("Duplicate", [canvas, scene, id, parent]() {
+		menu.addAction(mt("Vertical.DuplicateItem"), [canvas, scene, id, parent]() {
 			QString error;
 			if (!canvas->copySource(scene, id, error) || !canvas->pasteSource(scene, true, error))
 				QMessageBox::warning(parent, TITLE, error);
@@ -183,49 +182,49 @@ void addItemMenu(QMenu &menu, VerticalCanvas *canvas, qint64 id, QWidget *parent
 		menu.addSeparator();
 	}
 
-	QMenu *o = menu.addMenu("Order");
-	o->addAction("Move up", order(OBS_ORDER_MOVE_UP));
-	o->addAction("Move down", order(OBS_ORDER_MOVE_DOWN));
-	o->addAction("Move to top", order(OBS_ORDER_MOVE_TOP));
-	o->addAction("Move to bottom", order(OBS_ORDER_MOVE_BOTTOM));
+	QMenu *o = menu.addMenu(mt("Vertical.Order"));
+	o->addAction(mt("Vertical.MoveUp"), order(OBS_ORDER_MOVE_UP));
+	o->addAction(mt("Vertical.MoveDown"), order(OBS_ORDER_MOVE_DOWN));
+	o->addAction(mt("Vertical.MoveToTop"), order(OBS_ORDER_MOVE_TOP));
+	o->addAction(mt("Vertical.MoveToBottom"), order(OBS_ORDER_MOVE_BOTTOM));
 
 	if ((flags & OBS_SOURCE_VIDEO) && !grouped) {
-		QMenu *t = menu.addMenu("Transform");
-		t->addAction("Edit transform…", [canvas, id, parent]() { editTransform(parent, canvas, id); });
+		QMenu *t = menu.addMenu(mt("Vertical.Transform"));
+		t->addAction(mt("Vertical.TrEdit"), [canvas, id, parent]() { editTransform(parent, canvas, id); });
 		t->addSeparator();
-		t->addAction("Copy position and size", arrange("copy"));
-		t->addAction("Paste position and size", arrange("paste"))->setEnabled(canvas->canPasteTransform());
-		t->addAction("Reset size and position", arrange("reset"));
+		t->addAction(mt("Vertical.TrCopy"), arrange("copy"));
+		t->addAction(mt("Vertical.TrPaste"), arrange("paste"))->setEnabled(canvas->canPasteTransform());
+		t->addAction(mt("Vertical.TrReset"), arrange("reset"));
 		t->addSeparator();
-		t->addAction("Rotate 90° right", arrange("rotateRight"));
-		t->addAction("Rotate 90° left", arrange("rotateLeft"));
-		t->addAction("Rotate 180°", arrange("rotate180"));
+		t->addAction(mt("Vertical.RotateRight"), arrange("rotateRight"));
+		t->addAction(mt("Vertical.RotateLeft"), arrange("rotateLeft"));
+		t->addAction(mt("Vertical.TrRotate180"), arrange("rotate180"));
 		t->addSeparator();
-		t->addAction("Flip horizontal", arrange("flipH"));
-		t->addAction("Flip vertical", arrange("flipV"));
+		t->addAction(mt("Vertical.TrFlipH"), arrange("flipH"));
+		t->addAction(mt("Vertical.TrFlipV"), arrange("flipV"));
 		t->addSeparator();
-		t->addAction("Fit to frame", arrange("fit"));
-		t->addAction("Fill frame", arrange("fill"));
-		t->addAction("Fit to frame width", arrange("fitWidth"));
+		t->addAction(mt("Vertical.TrFit"), arrange("fit"));
+		t->addAction(mt("Vertical.TrFill"), arrange("fill"));
+		t->addAction(mt("Vertical.TrFitWidth"), arrange("fitWidth"));
 		t->addSeparator();
-		t->addAction("Center", arrange("center"));
-		t->addAction("Center horizontally", arrange("centerH"));
-		t->addAction("Center vertically", arrange("centerV"));
+		t->addAction(mt("Vertical.TrCenter"), arrange("center"));
+		t->addAction(mt("Vertical.TrCenterH"), arrange("centerH"));
+		t->addAction(mt("Vertical.TrCenterV"), arrange("centerV"));
 	}
 	menu.addSeparator();
 
-	menu.addAction(visible ? "Hide" : "Show", [canvas, scene, id, parent, visible]() {
+	menu.addAction(visible ? mt("Vertical.HideItem") : mt("Vertical.ColShow"), [canvas, scene, id, parent, visible]() {
 		QString error;
 		if (!canvas->setItemVisible(scene, id, !visible, error))
 			QMessageBox::warning(parent, TITLE, error);
 	});
-	menu.addAction(locked ? "Unlock" : "Lock", [canvas, scene, id, parent, locked]() {
+	menu.addAction(locked ? mt("Vertical.UnlockItem") : mt("Vertical.ColLock"), [canvas, scene, id, parent, locked]() {
 		QString error;
 		if (!canvas->setItemLocked(scene, id, !locked, error))
 			QMessageBox::warning(parent, TITLE, error);
 	});
 	menu.addSeparator();
-	menu.addAction("Remove from this scene", [canvas, id, parent, removed]() {
+	menu.addAction(mt("Vertical.RemoveFromScene"), [canvas, id, parent, removed]() {
 		if (askRemove(parent, canvas, id) && removed)
 			removed();
 	});
@@ -250,23 +249,23 @@ struct TransformDialog {
 
 // OBS's alignment flags, in the order OBS's dialog lists them.
 const struct {
-	const char *name;
+	const char *key; // its locale key
 	uint32_t value;
-} ALIGNS[] = {{"Top left", OBS_ALIGN_TOP | OBS_ALIGN_LEFT},
-	      {"Top", OBS_ALIGN_TOP},
-	      {"Top right", OBS_ALIGN_TOP | OBS_ALIGN_RIGHT},
-	      {"Left", OBS_ALIGN_LEFT},
-	      {"Center", OBS_ALIGN_CENTER},
-	      {"Right", OBS_ALIGN_RIGHT},
-	      {"Bottom left", OBS_ALIGN_BOTTOM | OBS_ALIGN_LEFT},
-	      {"Bottom", OBS_ALIGN_BOTTOM},
-	      {"Bottom right", OBS_ALIGN_BOTTOM | OBS_ALIGN_RIGHT}};
+} ALIGNS[] = {{"Vertical.AlignTopLeft", OBS_ALIGN_TOP | OBS_ALIGN_LEFT},
+	      {"Vertical.AlignTop", OBS_ALIGN_TOP},
+	      {"Vertical.AlignTopRight", OBS_ALIGN_TOP | OBS_ALIGN_RIGHT},
+	      {"Vertical.AlignLeft", OBS_ALIGN_LEFT},
+	      {"Vertical.AlignCenter", OBS_ALIGN_CENTER},
+	      {"Vertical.AlignRight", OBS_ALIGN_RIGHT},
+	      {"Vertical.AlignBottomLeft", OBS_ALIGN_BOTTOM | OBS_ALIGN_LEFT},
+	      {"Vertical.AlignBottom", OBS_ALIGN_BOTTOM},
+	      {"Vertical.AlignBottomRight", OBS_ALIGN_BOTTOM | OBS_ALIGN_RIGHT}};
 
 QComboBox *alignBox()
 {
 	auto *c = new QComboBox();
 	for (const auto &a : ALIGNS)
-		c->addItem(a.name, uint(a.value));
+		c->addItem(mt(a.key), uint(a.value));
 	return c;
 }
 
@@ -406,7 +405,7 @@ void editTransform(QWidget *parent, VerticalCanvas *canvas, qint64 id)
 
 	d->dlg = new QDialog(parent);
 	d->dlg->setAttribute(Qt::WA_DeleteOnClose);
-	d->dlg->setWindowTitle("Edit transform: " + name);
+	d->dlg->setWindowTitle(mt("Vertical.EditTransformTitle").arg(name));
 	auto *form = new QFormLayout(d->dlg);
 	d->x = numberBox(-100000, 100000, " px");
 	d->y = numberBox(-100000, 100000, " px");
@@ -415,13 +414,13 @@ void editTransform(QWidget *parent, VerticalCanvas *canvas, qint64 id)
 	d->h = numberBox(0, 100000, " px");
 	d->align = alignBox();
 	d->boundsType = new QComboBox();
-	for (const char *b : {"None", "Stretch to bounds", "Scale to inner bounds (fit)", "Scale to outer bounds (fill)",
-			      "Scale to width of bounds", "Scale to height of bounds", "Maximum size only"})
-		d->boundsType->addItem(b);
+	for (const char *b : {"Vertical.BoundsNone", "Vertical.BoundsStretch", "Vertical.BoundsInner", "Vertical.BoundsOuter",
+			      "Vertical.BoundsWidth", "Vertical.BoundsHeight", "Vertical.BoundsMax"})
+		d->boundsType->addItem(mt(b));
 	d->boundsAlign = alignBox();
 	d->bw = numberBox(0, 100000, " px");
 	d->bh = numberBox(0, 100000, " px");
-	d->cropToBounds = new QCheckBox("Crop to bounding box");
+	d->cropToBounds = new QCheckBox(mt("Vertical.CropToBox"));
 	d->cl = cropBox();
 	d->ct = cropBox();
 	d->cr = cropBox();
@@ -434,23 +433,23 @@ void editTransform(QWidget *parent, VerticalCanvas *canvas, qint64 id)
 		l->addWidget(b);
 		return row;
 	};
-	form->addRow("Position (x, y)", pair(d->x, d->y));
-	form->addRow("Rotation", d->rot);
-	form->addRow("Size (width, height)", pair(d->w, d->h));
-	form->addRow("Positional alignment", d->align);
-	form->addRow("Bounding box type", d->boundsType);
-	form->addRow("Alignment in bounding box", d->boundsAlign);
-	form->addRow("Bounding box size", pair(d->bw, d->bh));
+	form->addRow(mt("Vertical.FldPosition"), pair(d->x, d->y));
+	form->addRow(mt("Vertical.FldRotation"), d->rot);
+	form->addRow(mt("Vertical.FldSize"), pair(d->w, d->h));
+	form->addRow(mt("Vertical.FldAlign"), d->align);
+	form->addRow(mt("Vertical.FldBoundsType"), d->boundsType);
+	form->addRow(mt("Vertical.FldBoundsAlign"), d->boundsAlign);
+	form->addRow(mt("Vertical.FldBoundsSize"), pair(d->bw, d->bh));
 	form->addRow(QString(), d->cropToBounds);
-	form->addRow("Crop left, right", pair(d->cl, d->cr));
-	form->addRow("Crop top, bottom", pair(d->ct, d->cb));
-	auto *note = new QLabel("Changes show right away. Edit → Undo takes back everything changed here at once.");
+	form->addRow(mt("Vertical.FldCropLR"), pair(d->cl, d->cr));
+	form->addRow(mt("Vertical.FldCropTB"), pair(d->ct, d->cb));
+	auto *note = new QLabel(mt("Vertical.TransformNote"));
 	note->setWordWrap(true);
 	form->addRow(note);
 	auto *buttons = new QDialogButtonBox();
-	QPushButton *reset = buttons->addButton("Reset", QDialogButtonBox::ResetRole);
-	reset->setToolTip("Its own size, centred in the frame, no crop or rotation");
-	QPushButton *close = buttons->addButton("Close", QDialogButtonBox::AcceptRole);
+	QPushButton *reset = buttons->addButton(mt("Vertical.Reset"), QDialogButtonBox::ResetRole);
+	reset->setToolTip(mt("Vertical.ResetTip"));
+	QPushButton *close = buttons->addButton(mt("Vertical.Close"), QDialogButtonBox::AcceptRole);
 	form->addRow(buttons);
 
 	loadDialog(*d);
@@ -476,7 +475,7 @@ void editTransform(QWidget *parent, VerticalCanvas *canvas, qint64 id)
 		const std::string after = statesOf(s);
 		obs_scene_release(s);
 		if (after != d->before)
-			obs_frontend_add_undo_redo_action("Edit transform (vertical)", loadStates, loadStates,
+			obs_frontend_add_undo_redo_action(mt("Vertical.UndoEditTransform").toUtf8().constData(), loadStates, loadStates,
 							  d->before.c_str(), after.c_str(), false);
 	});
 	d->dlg->show();

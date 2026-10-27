@@ -2,6 +2,7 @@
 
 #include "games.hpp"
 #include "http.hpp"
+#include "i18n.hpp"
 #include "obs-state.hpp"
 #include "relay-output.hpp"
 #include "vertical/canvas.hpp"
@@ -130,14 +131,18 @@ QByteArray userAgent()
 }
 
 // Shown when the dock page has never loaded and Multistream can't be reached.
-const char *FALLBACK_PAGE =
-	"<!doctype html><html><head><meta charset=\"utf-8\"><title>Multistream</title>"
-	"<style>html,body{margin:0;height:100%;background:#0e0e13;color:#e8e7f2;font:14px system-ui,sans-serif}"
-	"main{padding:24px 18px}h1{font-size:18px;font-weight:600;margin:0 0 6px}p{color:#8a89a0;line-height:1.5;margin:0 0 16px}"
-	"button{border:0;border-radius:99px;padding:10px 18px;background:#a99cff;color:#0e0e13;font:inherit;font-weight:700;cursor:pointer}"
-	"</style></head><body><main><h1>Can't reach Multistream</h1>"
-	"<p>The Multistream dock loads from multistream.gg the first time. Check your internet connection, then try again.</p>"
-	"<button onclick=\"location.reload()\">Try again</button></main></body></html>";
+QByteArray fallbackPage()
+{
+	return QByteArray(
+		       "<!doctype html><html><head><meta charset=\"utf-8\"><title>Multistream</title>"
+		       "<style>html,body{margin:0;height:100%;background:#0e0e13;color:#e8e7f2;font:14px system-ui,sans-serif}"
+		       "main{padding:24px 18px}h1{font-size:18px;font-weight:600;margin:0 0 6px}p{color:#8a89a0;line-height:1.5;margin:0 0 16px}"
+		       "button{border:0;border-radius:99px;padding:10px 18px;background:#a99cff;color:#0e0e13;font:inherit;font-weight:700;cursor:pointer}"
+		       "</style></head><body><main><h1>") +
+	       mt("Bridge.OfflineTitle").toHtmlEscaped().toUtf8() + "</h1><p>" +
+	       mt("Bridge.OfflineBody").toHtmlEscaped().toUtf8() + "</p><button onclick=\"location.reload()\">" +
+	       mt("Bridge.OfflineRetry").toHtmlEscaped().toUtf8() + "</button></main></body></html>";
+}
 
 struct Conn {
 	QByteArray buf;
@@ -284,7 +289,7 @@ void Bridge::handle(QTcpSocket *s, const HttpRequest &r)
 	const bool api = r.path.startsWith("/bridge/") || r.path.startsWith("/cloud/") || r.path.startsWith("/app/");
 	if (api) {
 		if (secret_.isEmpty() || r.headers.value("x-ms-bridge") != secret_.toUtf8()) {
-			replyJson(s, 403, errorJson("Not allowed."));
+			replyJson(s, 403, errorJson(mt("Bridge.NotAllowed")));
 			return;
 		}
 		if (r.path.startsWith("/bridge/")) {
@@ -334,7 +339,7 @@ void Bridge::servePage(QTcpSocket *s, const QByteArray &rawPath)
 			if (f.open(QIODevice::ReadOnly))
 				body = f.readAll();
 			else if (index)
-				body = FALLBACK_PAGE;
+				body = fallbackPage();
 			else {
 				reply(sp, 404, "text/plain", "Not found");
 				return;
@@ -346,6 +351,7 @@ void Bridge::servePage(QTcpSocket *s, const QByteArray &rawPath)
 			cfg["version"] = PLUGIN_VERSION;
 			cfg["cloud"] = cloud_;
 			cfg["obs"] = obs_get_version_string();
+			cfg["locale"] = QString::fromUtf8(obs_get_locale());
 			const QByteArray tag = "<script>window.__MS=" + QJsonDocument(cfg).toJson(QJsonDocument::Compact) +
 					       "</script>";
 			const qsizetype at = body.indexOf("<head>");
@@ -380,7 +386,7 @@ void Bridge::proxy(QTcpSocket *s, const HttpRequest &r, const QString &url, bool
 	http_->send(req, server_, [this, sp, cloud, poll, logout](const HttpResult &res) {
 		const int code = res.status;
 		if (code == 0) {
-			QJsonObject o = errorJson(cloud ? "Can't reach Multistream." : "The Multistream app isn't open.");
+			QJsonObject o = errorJson(cloud ? mt("Bridge.CantReach") : mt("Bridge.AppNotOpen"));
 			o["unreachable"] = true;
 			replyJson(sp, 502, o);
 			return;
@@ -429,7 +435,7 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		return;
 	}
 	if (r.method != "POST") {
-		replyJson(s, 405, errorJson("Use POST."));
+		replyJson(s, 405, errorJson(mt("Bridge.UsePost")));
 		return;
 	}
 	QString error;
@@ -485,7 +491,7 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 	} else if (p == "open") {
 		const QString url = in.value("url").toString();
 		if (!url.startsWith(cloud_ + "/")) {
-			replyJson(s, 400, errorJson("Only Multistream pages open from here."));
+			replyJson(s, 400, errorJson(mt("Bridge.OnlyOwnPages")));
 			return;
 		}
 		QDesktopServices::openUrl(QUrl(url));
@@ -503,6 +509,6 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		saveToken("");
 		replyJson(s, 200, okJson());
 	} else {
-		replyJson(s, 404, errorJson("No such action."));
+		replyJson(s, 404, errorJson(mt("Bridge.NoSuchAction")));
 	}
 }

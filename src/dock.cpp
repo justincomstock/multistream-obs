@@ -32,7 +32,7 @@ void dock::create()
 	container->setStyleSheet("#multistreamDock { background: #0e0e13; } QLabel { color: #8a89a0; }");
 	auto *layout = new QVBoxLayout(container);
 	layout->setContentsMargins(0, 0, 0, 0);
-	label = new QLabel("Loading Multistream...");
+	label = new QLabel(QString::fromUtf8(obs_module_text("Dock.Loading")));
 	label->setAlignment(Qt::AlignCenter);
 	label->setWordWrap(true);
 	layout->addWidget(label);
@@ -47,7 +47,7 @@ void dock::loadPage(const QString &url)
 	cef = obs_browser_init_panel();
 	if (!cef) {
 		if (label)
-			label->setText("The Multistream dock needs OBS's browser, which this OBS doesn't have.");
+			label->setText(QString::fromUtf8(obs_module_text("Dock.NoBrowser")));
 		return;
 	}
 	cef->init_browser();
@@ -55,7 +55,7 @@ void dock::loadPage(const QString &url)
 	browser = cef->create_widget(container, url.toStdString(), nullptr);
 	if (!browser) {
 		if (label)
-			label->setText("The Multistream dock couldn't open its page.");
+			label->setText(QString::fromUtf8(obs_module_text("Dock.NoPage")));
 		return;
 	}
 	if (label) {

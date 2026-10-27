@@ -1,4 +1,5 @@
 #include "theme.hpp"
+#include "../i18n.hpp"
 
 #include <QDateTime>
 #include <QPainter>
@@ -362,7 +363,7 @@ void Meter::paintEvent(QPaintEvent *)
 QString SceneDelegate::tag(bool shown, const QString &mains)
 {
 	if (shown)
-		return live ? QStringLiteral("ON AIR") : QStringLiteral("SHOWING");
+		return live ? mt("Vertical.OnAir") : mt("Vertical.Showing");
 	return mains.isEmpty() ? QString() : QStringLiteral("← ") + mains;
 }
 

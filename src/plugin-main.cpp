@@ -132,7 +132,7 @@ void notePluginFolder()
 
 MODULE_EXPORT const char *obs_module_description(void)
 {
-	return "Multistream: check everything, then go live on all your platforms from one dock.";
+	return obs_module_text("Plugin.Description");
 }
 
 bool obs_module_load(void)

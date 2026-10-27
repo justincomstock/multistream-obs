@@ -1,6 +1,7 @@
 #include "preview.hpp"
 
 #include "canvas.hpp"
+#include "../i18n.hpp"
 #include "geometry.hpp"
 #include "item-menu.hpp"
 
@@ -58,7 +59,7 @@ const float NO_GUIDE = std::numeric_limits<float>::quiet_NaN();
 // Where the phone apps put their own buttons and captions, as parts of the frame.
 struct Zone {
 	float x, y, w, h;
-	const char *what;
+	const char *what; // its locale key
 };
 struct SafeArea {
 	const char *name;
@@ -66,17 +67,17 @@ struct SafeArea {
 };
 const SafeArea SAFE_AREAS[3] = {
 	{"TikTok",
-	 {{0, 0, 1, 0.08f, "TikTok's top bar"},
-	  {0, 0.80f, 1, 0.20f, "TikTok's caption and name"},
-	  {0.86f, 0.35f, 0.14f, 0.45f, "TikTok's like and share buttons"}}},
+	 {{0, 0, 1, 0.08f, "Vertical.ZoneTikTokTop"},
+	  {0, 0.80f, 1, 0.20f, "Vertical.ZoneTikTokCaption"},
+	  {0.86f, 0.35f, 0.14f, 0.45f, "Vertical.ZoneTikTokButtons"}}},
 	{"YouTube Shorts",
-	 {{0, 0, 1, 0.07f, "YouTube's top bar"},
-	  {0, 0.79f, 1, 0.21f, "YouTube's title and channel name"},
-	  {0.85f, 0.45f, 0.15f, 0.34f, "YouTube's like and comment buttons"}}},
+	 {{0, 0, 1, 0.07f, "Vertical.ZoneYouTubeTop"},
+	  {0, 0.79f, 1, 0.21f, "Vertical.ZoneYouTubeCaption"},
+	  {0.85f, 0.45f, 0.15f, 0.34f, "Vertical.ZoneYouTubeButtons"}}},
 	{"Instagram Reels",
-	 {{0, 0, 1, 0.07f, "Instagram's top bar"},
-	  {0, 0.80f, 1, 0.20f, "Instagram's caption and name"},
-	  {0.86f, 0.50f, 0.14f, 0.30f, "Instagram's like and share buttons"}}},
+	 {{0, 0, 1, 0.07f, "Vertical.ZoneInstagramTop"},
+	  {0, 0.80f, 1, 0.20f, "Vertical.ZoneInstagramCaption"},
+	  {0.86f, 0.50f, 0.14f, 0.30f, "Vertical.ZoneInstagramButtons"}}},
 };
 
 bool isVideo(obs_sceneitem_t *item)
@@ -478,7 +479,7 @@ void PreviewWidget::openProjector(VerticalCanvas *canvas)
 	p->projector_.store(true);
 	p->setAcceptDrops(false);
 	p->setAttribute(Qt::WA_DeleteOnClose);
-	p->setWindowTitle("Vertical projector");
+	p->setWindowTitle(mt("Vertical.ProjectorTitle"));
 	p->setToolTip(QString());
 	const int h = 720;
 	p->resize(h * std::max(canvas->width(), 1) / std::max(canvas->height(), 1), h);
@@ -934,7 +935,7 @@ QString PreviewWidget::tipAt(const QPointF &p, obs_sceneitem_t *item) const
 	if (item) {
 		QString name = QString::fromUtf8(obs_source_get_name(obs_sceneitem_get_source(item)));
 		if (obs_sceneitem_locked(item))
-			name += " (locked)";
+			name = mt("Vertical.NameLocked").arg(name);
 		lines << name;
 	}
 	const int area = safeArea_.load();
@@ -942,7 +943,7 @@ QString PreviewWidget::tipAt(const QPointF &p, obs_sceneitem_t *item) const
 	if (area > 0)
 		for (const Zone &z : SAFE_AREAS[area - 1].zones)
 			if (p.x() >= W * z.x && p.x() <= W * (z.x + z.w) && p.y() >= H * z.y && p.y() <= H * (z.y + z.h)) {
-				lines << QString("Covered by %1 on phones").arg(z.what);
+				lines << mt("Vertical.CoveredBy").arg(mt(z.what));
 				break;
 			}
 	return lines.isEmpty() ? hint : lines.join("\n");
@@ -1100,11 +1101,11 @@ void PreviewWidget::mouseMoveEvent(QMouseEvent *e)
 void PreviewWidget::mouseReleaseEvent(QMouseEvent *)
 {
 	if (drag_ == Drag::Move)
-		endUndo("Move vertical source");
+		endUndo(obs_module_text("Vertical.UndoMove"));
 	else if (drag_ == Drag::Resize)
-		endUndo("Resize vertical source");
+		endUndo(obs_module_text("Vertical.UndoResize"));
 	else if (drag_ == Drag::Crop)
-		endUndo("Crop vertical source");
+		endUndo(obs_module_text("Vertical.UndoCrop"));
 	drag_ = Drag::None;
 	handle_ = -1;
 	guideX_.store(NO_GUIDE);
@@ -1161,7 +1162,7 @@ void PreviewWidget::flushNudge()
 	if (!nudging_)
 		return;
 	nudging_ = false;
-	endUndo("Nudge vertical source");
+	endUndo(obs_module_text("Vertical.UndoNudge"));
 }
 
 void PreviewWidget::askRemove(qint64 id)
@@ -1304,11 +1305,11 @@ void PreviewWidget::contextMenuEvent(QContextMenuEvent *e)
 {
 	if (projector_.load()) {
 		QMenu menu(this);
-		QMenu *full = menu.addMenu("Fullscreen on");
+		QMenu *full = menu.addMenu(mt("Vertical.FullscreenOn"));
 		const QList<QScreen *> screens = QGuiApplication::screens();
 		for (int i = 0; i < screens.size(); i++) {
 			QScreen *sc = screens[i];
-			full->addAction(QString("Screen %1 (%2×%3)").arg(i + 1).arg(sc->size().width()).arg(sc->size().height()),
+			full->addAction(mt("Vertical.ScreenN").arg(i + 1).arg(sc->size().width()).arg(sc->size().height()),
 					[this, sc]() {
 						showNormal();
 						setGeometry(sc->geometry());
@@ -1316,8 +1317,8 @@ void PreviewWidget::contextMenuEvent(QContextMenuEvent *e)
 					});
 		}
 		if (isFullScreen())
-			menu.addAction("Leave fullscreen (Esc)", [this]() { showNormal(); });
-		menu.addAction("Close", [this]() { close(); });
+			menu.addAction(mt("Vertical.LeaveFullscreen"), [this]() { showNormal(); });
+		menu.addAction(mt("Vertical.Close"), [this]() { close(); });
 		menu.exec(e->globalPos());
 		return;
 	}
@@ -1349,29 +1350,30 @@ void PreviewWidget::contextMenuEvent(QContextMenuEvent *e)
 	} else if (haveScene) {
 		if (onAddSource) {
 			QPoint at = e->globalPos();
-			menu.addAction("Add a source…", [this, at]() { onAddSource(this, at); });
+			menu.addAction(mt("Vertical.AddSourceMenu"), [this, at]() { onAddSource(this, at); });
 		}
 		vitem::addPasteActions(menu, canvas_, this);
 		menu.addSeparator();
 	}
-	QMenu *safe = menu.addMenu("Phone app safe areas");
-	const char *names[4] = {"Off", SAFE_AREAS[0].name, SAFE_AREAS[1].name, SAFE_AREAS[2].name};
+	QMenu *safe = menu.addMenu(mt("Vertical.SafeAreasMenu"));
+	const QString names[4] = {mt("Vertical.Off"), QString::fromUtf8(SAFE_AREAS[0].name),
+				  QString::fromUtf8(SAFE_AREAS[1].name), QString::fromUtf8(SAFE_AREAS[2].name)}; // the apps are brand names
 	for (int i = 0; i < 4; i++) {
 		QAction *a = safe->addAction(names[i], [this, i]() { setSafeArea(i); });
 		a->setCheckable(true);
 		a->setChecked(safeArea() == i);
 	}
-	menu.addAction("Zoom to fit (Ctrl+0)", [this]() {
+	menu.addAction(mt("Vertical.ZoomFit"), [this]() {
 		zoom_.store(1.0f);
 		panX_.store(0);
 		panY_.store(0);
 		zoomChanged();
 	});
 	VerticalCanvas *c = canvas_;
-	menu.addAction("Open vertical projector", [c]() { openProjector(c); });
+	menu.addAction(mt("Vertical.OpenProjector"), [c]() { openProjector(c); });
 	if (onTurnOff) {
 		menu.addSeparator();
-		menu.addAction("Turn off the preview", [this]() { onTurnOff(); });
+		menu.addAction(mt("Vertical.TurnOffPreview"), [this]() { onTurnOff(); });
 	}
 	menu.exec(e->globalPos());
 }

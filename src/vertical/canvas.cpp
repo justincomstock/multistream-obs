@@ -1,4 +1,5 @@
 #include "canvas.hpp"
+#include "../i18n.hpp"
 #include "record.hpp"
 
 #include <obs-module.h>
@@ -470,7 +471,7 @@ bool VerticalCanvas::linkScene(const QString &main, const QString &scene, QStrin
 	obs_source_t *m = obs_get_source_by_name(main.toUtf8().constData());
 	if (!m || !obs_source_is_scene(m)) {
 		obs_source_release(m);
-		error = "There's no main scene called \"" + main + "\".";
+		error = mt("Vertical.NoMainScene").arg(main);
 		return false;
 	}
 	const QString mainUuid = QString::fromUtf8(obs_source_get_uuid(m));
@@ -480,7 +481,7 @@ bool VerticalCanvas::linkScene(const QString &main, const QString &scene, QStrin
 	} else {
 		obs_scene_t *s = findScene(scene);
 		if (!s) {
-			error = "There's no vertical scene called \"" + scene + "\".";
+			error = mt("Vertical.NoScene").arg(scene);
 			return false;
 		}
 		links_[mainUuid] = QString::fromUtf8(obs_source_get_uuid(obs_scene_get_source(s)));
@@ -611,7 +612,7 @@ void VerticalCanvas::registerSceneHotkeys()
 		if (have.contains(uuid))
 			continue;
 		const obs_hotkey_id id = obs_hotkey_register_source(src, "MultistreamVertical.SwitchTo",
-								    "Switch to vertical scene", onSceneHotkey, this);
+								    obs_module_text("Vertical.HotkeySwitch"), onSceneHotkey, this);
 		if (id != OBS_INVALID_HOTKEY_ID)
 			sceneHotkeys_[id] = uuid;
 	}
@@ -688,7 +689,7 @@ bool VerticalCanvas::setScene(const QString &name, QString &error)
 {
 	obs_scene_t *s = findScene(name);
 	if (!s) {
-		error = "There's no vertical scene called \"" + name + "\".";
+		error = mt("Vertical.NoScene").arg(name);
 		return false;
 	}
 	showScene(obs_scene_get_source(s));
@@ -700,7 +701,7 @@ namespace {
 bool checkName(const QString &n, QString &error)
 {
 	if (n.isEmpty()) {
-		error = "Give the scene a name.";
+		error = mt("Vertical.NeedName");
 		return false;
 	}
 	return true;
@@ -710,7 +711,7 @@ bool checkName(const QString &n, QString &error)
 bool VerticalCanvas::createScene(const QString &name, QString &error)
 {
 	if (!canvas_) {
-		error = "The vertical canvas isn't ready.";
+		error = mt("Vertical.NotReady");
 		return false;
 	}
 	const QString n = name.trimmed();
@@ -718,12 +719,12 @@ bool VerticalCanvas::createScene(const QString &name, QString &error)
 		return false;
 	if (obs_scene_t *have = findScene(n)) {
 		obs_scene_release(have);
-		error = "There's already a vertical scene called \"" + n + "\".";
+		error = mt("Vertical.SceneExists").arg(n);
 		return false;
 	}
 	obs_scene_t *s = obs_canvas_scene_create(canvas_, n.toUtf8().constData());
 	if (!s) {
-		error = "OBS couldn't make the scene.";
+		error = mt("Vertical.CantMakeScene");
 		return false;
 	}
 	order_ = [&]() {
@@ -749,14 +750,14 @@ bool VerticalCanvas::renameScene(const QString &name, const QString &to, QString
 		return false;
 	obs_scene_t *s = findScene(name);
 	if (!s) {
-		error = "There's no vertical scene called \"" + name + "\".";
+		error = mt("Vertical.NoScene").arg(name);
 		return false;
 	}
 	if (n != name) {
 		if (obs_scene_t *have = findScene(n)) {
 			obs_scene_release(have);
 			obs_scene_release(s);
-			error = "There's already a vertical scene called \"" + n + "\".";
+			error = mt("Vertical.SceneExists").arg(n);
 			return false;
 		}
 		obs_source_set_name(obs_scene_get_source(s), n.toUtf8().constData());
@@ -776,20 +777,20 @@ bool VerticalCanvas::duplicateScene(const QString &name, const QString &to, QStr
 		return false;
 	obs_scene_t *s = findScene(name);
 	if (!s) {
-		error = "There's no vertical scene called \"" + name + "\".";
+		error = mt("Vertical.NoScene").arg(name);
 		return false;
 	}
 	if (obs_scene_t *have = findScene(n)) {
 		obs_scene_release(have);
 		obs_scene_release(s);
-		error = "There's already a vertical scene called \"" + n + "\".";
+		error = mt("Vertical.SceneExists").arg(n);
 		return false;
 	}
 	// Stays on the original's canvas; the items share the sources.
 	obs_scene_t *copy = obs_scene_duplicate(s, n.toUtf8().constData(), OBS_SCENE_DUP_REFS);
 	obs_scene_release(s);
 	if (!copy) {
-		error = "OBS couldn't copy the scene.";
+		error = mt("Vertical.CantCopyScene");
 		return false;
 	}
 	// Right after the original.
@@ -816,12 +817,12 @@ bool VerticalCanvas::removeScene(const QString &name, QString &error)
 {
 	const QStringList names = sceneNames();
 	if (names.size() <= 1) {
-		error = "The vertical canvas needs at least one scene.";
+		error = mt("Vertical.NeedOneScene");
 		return false;
 	}
 	obs_scene_t *s = findScene(name);
 	if (!s) {
-		error = "There's no vertical scene called \"" + name + "\".";
+		error = mt("Vertical.NoScene").arg(name);
 		return false;
 	}
 	obs_source_t *src = obs_scene_get_source(s);
@@ -850,7 +851,7 @@ bool VerticalCanvas::moveScene(const QString &name, int delta, QString &error)
 	QStringList names = sceneNames();
 	const int at = names.indexOf(name);
 	if (at < 0) {
-		error = "There's no vertical scene called \"" + name + "\".";
+		error = mt("Vertical.NoScene").arg(name);
 		return false;
 	}
 	const int to = qBound(0, at + delta, int(names.size()) - 1);
@@ -872,7 +873,7 @@ bool VerticalCanvas::addSource(const QString &scene, const QString &source, QStr
 {
 	obs_scene_t *s = findScene(scene);
 	if (!s) {
-		error = "There's no vertical scene called \"" + scene + "\".";
+		error = mt("Vertical.NoScene").arg(scene);
 		return false;
 	}
 	obs_source_t *src = nullptr;
@@ -887,13 +888,13 @@ bool VerticalCanvas::addSource(const QString &scene, const QString &source, QStr
 	}
 	if (!src) {
 		obs_scene_release(s);
-		error = "There's no source called \"" + source + "\".";
+		error = mt("Vertical.NoSource").arg(source);
 		return false;
 	}
 	if (source == scene) {
 		obs_source_release(src);
 		obs_scene_release(s);
-		error = "A scene can't be added to itself.";
+		error = mt("Vertical.SceneIntoItself");
 		return false;
 	}
 	obs_sceneitem_t *item = obs_scene_add(s, src);
@@ -906,10 +907,9 @@ bool VerticalCanvas::addSource(const QString &scene, const QString &source, QStr
 	obs_source_release(src);
 	obs_scene_release(s);
 	if (!item) {
-		error = isScene ? "\"" + source + "\" already has \"" + scene +
-					  "\" inside it, so adding it here would put the scene inside itself."
-		      : !hasVideo ? "\"" + source + "\" has no picture or sound, so it can't go in a scene."
-				  : "OBS couldn't add \"" + source + "\" to this vertical scene.";
+		error = isScene ? mt("Vertical.AddSceneLoop").arg(source, scene)
+		      : !hasVideo ? mt("Vertical.NoPictureOrSound").arg(source)
+				  : mt("Vertical.CantAddSource").arg(source);
 		return false;
 	}
 	refreshAudio();
@@ -998,7 +998,7 @@ bool VerticalCanvas::setAudio(const QString &source, const QJsonObject &in, QStr
 			uuid = s.value("uuid").toString();
 	}
 	if (uuid.isEmpty()) {
-		error = "\"" + source + "\" isn't in a vertical scene, so it has no vertical volume.";
+		error = mt("Vertical.NoVerticalVolume").arg(source);
 		return false;
 	}
 	VerticalAudio::Setting s = audio_.setting(uuid.toStdString());

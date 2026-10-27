@@ -2,6 +2,7 @@
 // choices, and where a newly added source lands.
 #include "canvas.hpp"
 #include "geometry.hpp"
+#include "../i18n.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -119,7 +120,7 @@ bool VerticalCanvas::arrangeItem(const QString &scene, qint64 id, const QString 
 	obs_sceneitem_t *item = s ? obs_scene_find_sceneitem_by_id(s, id) : nullptr;
 	if (!item) {
 		obs_scene_release(s);
-		error = "That source isn't in the vertical scene \"" + scene + "\".";
+		error = mt("Vertical.SourceNotInScene").arg(scene);
 		return false;
 	}
 	const float W = float(width_), H = float(height_);
@@ -134,7 +135,7 @@ bool VerticalCanvas::arrangeItem(const QString &scene, qint64 id, const QString 
 		if (action != "centerH")
 			t.pos.y += H / 2.0f - (r.y + r.h / 2.0f);
 		obs_sceneitem_set_info2(item, &t);
-		what = "Center";
+		what = mt("Vertical.TrCenter");
 	} else if (action == "fit" || action == "fill") {
 		// Flips and crops stay; "Fill" trims what spills past the frame.
 		const bool fill = action == "fill";
@@ -147,14 +148,14 @@ bool VerticalCanvas::arrangeItem(const QString &scene, qint64 id, const QString 
 		vec2_set(&t.bounds, W, H);
 		t.crop_to_bounds = fill;
 		obs_sceneitem_set_info2(item, &t);
-		what = fill ? "Fill frame" : "Fit to frame";
+		what = mt(fill ? "Vertical.TrFill" : "Vertical.TrFit");
 	} else if (action == "fitWidth") {
 		struct obs_sceneitem_crop crop;
 		obs_sceneitem_get_crop(item, &crop);
 		const float w = float(int(obs_source_get_width(obs_sceneitem_get_source(item))) - crop.left - crop.right);
 		if (w <= 0.0f) {
 			obs_scene_release(s);
-			error = "It has no picture yet, so it has no width to fit. Try again once it shows something.";
+			error = mt("Vertical.NoWidthToFit");
 			return false;
 		}
 		const float k = W / w;
@@ -165,7 +166,7 @@ bool VerticalCanvas::arrangeItem(const QString &scene, qint64 id, const QString 
 		vec2_set(&t.pos, W / 2.0f, H / 2.0f);
 		vec2_set(&t.scale, t.scale.x < 0 ? -k : k, t.scale.y < 0 ? -k : k);
 		obs_sceneitem_set_info2(item, &t);
-		what = "Fit to frame width";
+		what = mt("Vertical.TrFitWidth");
 	} else if (action == "resetQuiet") {
 		// The Edit transform window's Reset: its visit is one undo step of its own.
 		ownSize(item, W, H, true);
@@ -173,11 +174,11 @@ bool VerticalCanvas::arrangeItem(const QString &scene, qint64 id, const QString 
 		return true;
 	} else if (action == "reset") {
 		ownSize(item, W, H, true);
-		what = "Reset size and position";
+		what = mt("Vertical.TrReset");
 	} else if (action == "rotateRight" || action == "rotateLeft" || action == "rotate180") {
 		const float by = action == "rotateRight" ? 90.0f : action == "rotateLeft" ? -90.0f : 180.0f;
 		inPlace(item, [by](struct obs_transform_info &i) { i.rot = std::fmod(i.rot + by + 360.0f, 360.0f); });
-		what = "Rotate";
+		what = mt("Vertical.TrRotate");
 	} else if (action == "flipH" || action == "flipV") {
 		const bool h = action == "flipH";
 		inPlace(item, [h](struct obs_transform_info &i) {
@@ -186,7 +187,7 @@ bool VerticalCanvas::arrangeItem(const QString &scene, qint64 id, const QString 
 			else
 				i.scale.y = -i.scale.y;
 		});
-		what = h ? "Flip horizontal" : "Flip vertical";
+		what = mt(h ? "Vertical.TrFlipH" : "Vertical.TrFlipV");
 	} else if (action == "copy") {
 		copiedInfo_ = t;
 		obs_sceneitem_get_crop(item, &copiedCrop_);
@@ -196,19 +197,19 @@ bool VerticalCanvas::arrangeItem(const QString &scene, qint64 id, const QString 
 	} else if (action == "paste") {
 		if (!copied_) {
 			obs_scene_release(s);
-			error = "Copy a source's position and size first (right-click it, Transform, Copy).";
+			error = mt("Vertical.CopyTransformFirst");
 			return false;
 		}
 		obs_sceneitem_set_info2(item, &copiedInfo_);
 		obs_sceneitem_set_crop(item, &copiedCrop_);
-		what = "Paste position and size";
+		what = mt("Vertical.TrPaste");
 	} else {
 		obs_scene_release(s);
-		error = "Unknown action \"" + action + "\".";
+		error = mt("Vertical.UnknownAction").arg(action);
 		return false;
 	}
 	const std::string after = statesOf(s);
-	const std::string label = what.toStdString() + " (vertical)";
+	const std::string label = mt("Vertical.UndoNamed").arg(what).toStdString();
 	if (after != before)
 		obs_frontend_add_undo_redo_action(label.c_str(), loadStates, loadStates, before.c_str(), after.c_str(),
 						  false);
