@@ -15,6 +15,9 @@ namespace {
 
 const char *CLIENT = "multistream-obs-plugin";
 const qint64 RETRY_MS = 5000;
+// After a drop the dock says "reconnecting" this long; a reason that is still
+// there after it is shown as the error instead.
+const qint64 DROP_GRACE_MS = 3 * 60 * 1000;
 
 struct Enc {
 	const char *id;
@@ -144,6 +147,7 @@ void RelayOutput::releaseAll()
 		signal_handler_disconnect(sh, "stop", onStop, this);
 		signal_handler_disconnect(sh, "reconnect", onReconnect, this);
 		signal_handler_disconnect(sh, "reconnect_success", onReconnectSuccess, this);
+		++*callbackEpoch_;
 		obs_output_release(output_);
 		output_ = nullptr;
 	}
@@ -188,10 +192,16 @@ bool RelayOutput::build()
 	obs_data_set_string(vs, "profile", "high");
 	obs_data_set_string(vs, "preset", "veryfast"); // x264
 	obs_data_set_string(vs, "preset2", "p5");      // NVENC
+	// Another picture size or bitrate gives the failed encoders a new chance.
+	if (!failedEncoders_.isEmpty() && failedSig_ != sig())
+		failedEncoders_.clear();
 	for (const Enc &e : ENCODERS) {
 		// OBS hands back a placeholder for an id it doesn't have (NVENC on a
 		// Mac), so only try encoders this OBS actually registered.
 		if (!obs_get_encoder_codec(e.id))
+			continue;
+		// One that stopped with an encoder error is out for this OBS session.
+		if (failedEncoders_.contains(e.label))
 			continue;
 		venc_ = obs_video_encoder_create(e.id, (name + " video").constData(), vs, nullptr);
 		if (venc_) {
@@ -200,10 +210,28 @@ bool RelayOutput::build()
 		}
 	}
 	obs_data_release(vs);
+	if (!venc_ && !failedEncoders_.isEmpty()) {
+		// Every encoder this OBS has already failed: trying again would only
+		// repeat it, so stop and say what to change.
+		obs_log(LOG_WARNING, "Multistream output: every video encoder failed (%s), not trying again",
+			failedEncoders_.join(", ").toUtf8().constData());
+		error_ = mt("Relay.AllEncodersFailed");
+		wanted_ = false;
+		manual_ = false;
+		releaseAll();
+		return false;
+	}
 	if (!venc_ || !service_) {
 		error_ = mt("Relay.NoVideoEncoder");
 		releaseAll();
 		return false;
+	}
+	if (failedEncoders_.isEmpty()) {
+		note_.clear();
+	} else {
+		note_ = mt("Relay.EncoderSwitched").arg(encoder_);
+		obs_log(LOG_WARNING, "Multistream output: %s failed, switched to %s", failedEncoders_.join(", ").toUtf8().constData(),
+			encoder_.toUtf8().constData());
 	}
 	obs_encoder_set_video(venc_, video);
 
@@ -228,7 +256,11 @@ bool RelayOutput::build()
 	obs_output_set_service(output_, service_);
 	obs_output_set_video_encoder(output_, venc_);
 	obs_output_set_audio_encoder(output_, aenc_, 0);
-	obs_output_set_reconnect_settings(output_, 60, 2);
+	// No reconnecting inside OBS: it waits 2 s, then 1.5 times longer after every
+	// failed try (minutes for a feed that was down a while), and the platforms
+	// only wait protectionHoldMin. A drop ends the output and tick() sends again
+	// every RETRY_MS instead.
+	obs_output_set_reconnect_settings(output_, 0, 0);
 	signal_handler_t *sh = obs_output_get_signal_handler(output_);
 	signal_handler_connect(sh, "start", onStart, this);
 	signal_handler_connect(sh, "stop", onStop, this);
@@ -238,11 +270,29 @@ bool RelayOutput::build()
 	return true;
 }
 
+bool RelayOutput::anotherEncoderLeft() const
+{
+	for (const Enc &e : ENCODERS)
+		if (obs_get_encoder_codec(e.id) && !failedEncoders_.contains(e.label))
+			return true;
+	return false;
+}
+
+bool RelayOutput::noteEncoderFailed()
+{
+	if (!encoder_.isEmpty() && !failedEncoders_.contains(encoder_)) {
+		failedEncoders_ << encoder_;
+		failedSig_ = builtSig_.isEmpty() ? sig() : builtSig_;
+		obs_log(LOG_WARNING, "Multistream output: the %s encoder stopped, skipping it from now on", encoder_.toUtf8().constData());
+	}
+	return anotherEncoderLeft();
+}
+
 bool RelayOutput::startOutput()
 {
 	if (!enabled_)
 		return false;
-	if (attempting_ || (output_ && obs_output_active(output_)))
+	if (stopping_ || attempting_ || (output_ && obs_output_active(output_)))
 		return true;
 	lastTry_ = now();
 	if (!output_ || builtSig_ != sig()) {
@@ -250,6 +300,7 @@ bool RelayOutput::startOutput()
 		if (!build())
 			return false;
 	}
+	++*callbackEpoch_;
 	attempting_ = true;
 	if (!obs_output_start(output_)) {
 		attempting_ = false;
@@ -271,6 +322,8 @@ bool RelayOutput::startNow()
 	}
 	manual_ = true;
 	wanted_ = true;
+	if (!anotherEncoderLeft())
+		failedEncoders_.clear(); // gave up before: a new press tries them all again
 	return startOutput();
 }
 
@@ -283,16 +336,23 @@ void RelayOutput::stopOutput()
 {
 	wanted_ = false;
 	manual_ = false;
+	stopping_ = stopping_ || attempting_ || (output_ && obs_output_active(output_));
+	// obs_output_stop does not cancel an initial RTMP connection. Do not
+	// force-stop or release it here: RTMP joins its connect thread and could
+	// freeze OBS. onStart cleans up a late success; onStop settles a failure.
 	if (output_)
 		obs_output_stop(output_);
 	sending_ = false;
 	reconnecting_ = false;
+	dropped_ = false;
 }
 
 void RelayOutput::onFrontendEvent(int event)
 {
 	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED && enabled_) {
 		wanted_ = true;
+		if (!anotherEncoderLeft())
+			failedEncoders_.clear();
 		startOutput();
 	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPING && !manual_) {
 		stopOutput();
@@ -301,20 +361,21 @@ void RelayOutput::onFrontendEvent(int event)
 
 void RelayOutput::tick()
 {
-	if (!wanted_ || attempting_ || (output_ && obs_output_active(output_)) || now() - lastTry_ < RETRY_MS)
+	if (!wanted_ || stopping_ || attempting_ || (output_ && obs_output_active(output_)) || now() - lastTry_ < RETRY_MS)
 		return;
-	if (!enabled_ || (!manual_ && !obs_frontend_streaming_active()))
+	if (!enabled_ || (!manual_ && !obs_frontend_streaming_active())) {
 		wanted_ = false;
-	else
+		dropped_ = false;
+	} else
 		startOutput();
 }
 
 void RelayOutput::shutdown()
 {
-	wanted_ = false;
-	if (output_ && obs_output_active(output_))
-		obs_output_stop(output_);
+	stopOutput();
 	releaseAll();
+	attempting_ = false;
+	stopping_ = false;
 }
 
 QJsonObject RelayOutput::state() const
@@ -326,21 +387,42 @@ QJsonObject RelayOutput::state() const
 	o["server"] = server_;
 	o["bitrate"] = bitrate_;
 	o["sending"] = sending_;
-	o["reconnecting"] = reconnecting_;
-	o["connecting"] = attempting_;
+	// Coming back by itself after a drop counts as reconnecting between tries too.
+	o["reconnecting"] = reconnecting_ || (dropped_ && wanted_);
+	o["connecting"] = wanted_ && (attempting_ || stopping_);
 	o["encoder"] = encoder_;
 	o["error"] = error_;
+	o["note"] = note_;
 	o["startedAt"] = double(sending_ ? startedAt_ : 0);
 	return o;
+}
+
+void RelayOutput::queueCallback(std::function<void()> fn)
+{
+	const auto epoch = callbackEpoch_;
+	const auto value = epoch->load();
+	onUi([epoch, value, fn]() {
+		if (epoch->load() == value)
+			fn();
+	});
 }
 
 void RelayOutput::onStart(void *data, calldata_t *)
 {
 	auto *self = static_cast<RelayOutput *>(data);
-	onUi([self]() {
+	self->queueCallback([self]() {
 		self->attempting_ = false;
+		if (self->stopping_ || !self->wanted_) {
+			// This connection finished after Stop. Never publish Sending, and
+			// close it without waiting for another video packet. Keep the
+			// stopping gate until the stop signal, even if Start was pressed.
+			if (self->output_ && obs_output_active(self->output_))
+				obs_output_force_stop(self->output_);
+			return;
+		}
 		self->sending_ = true;
 		self->reconnecting_ = false;
+		self->dropped_ = false;
 		self->error_.clear();
 	});
 }
@@ -352,16 +434,49 @@ void RelayOutput::onStop(void *data, calldata_t *cd)
 	obs_output_t *out = static_cast<obs_output_t *>(calldata_ptr(cd, "output"));
 	const char *err = out ? obs_output_get_last_error(out) : nullptr;
 	QString detail = err && *err ? QString::fromUtf8(err) : QString();
-	onUi([self, code, detail]() {
+	self->queueCallback([self, code, detail]() {
+		const bool wasSending = self->sending_;
 		self->attempting_ = false;
 		self->sending_ = false;
 		self->reconnecting_ = false;
+		if (self->stopping_ || !self->wanted_) {
+			self->stopping_ = false;
+			self->dropped_ = false;
+			// Discard the rest of this cancelled attempt's queued signals.
+			++*self->callbackEpoch_;
+			self->lastTry_ = 0; // a deliberate new Start may proceed next tick
+			return;
+		}
+		// A feed that was sending and lost the link (not an encoder problem, not
+		// a Stop) is coming back: tick() tries again, the dock says reconnecting.
+		if (code != 0 && code != -6 && code != -8 && wasSending && self->wanted_) {
+			self->dropped_ = true;
+			self->droppedAt_ = now();
+		}
 		if (code != 0) {
 			self->error_ = stopReason(code);
 			if (!detail.isEmpty())
 				self->error_ += " " + detail;
-			if (self->wanted_)
+			if (code == -6 || code == -8) {
+				// The encoder itself is the problem (a graphics card out of
+				// encoder sessions, say): the next try builds with the next
+				// one instead of this one again.
+				const bool more = self->noteEncoderFailed();
+				self->releaseAll();
+				if (!more) {
+					self->error_ = mt("Relay.AllEncodersFailed");
+					self->wanted_ = false;
+					self->manual_ = false;
+				} else if (self->wanted_) {
+					self->error_ += " " + mt("Relay.TryingAnotherEncoder");
+				}
+			} else if (self->dropped_ && self->wanted_ && now() - self->droppedAt_ < DROP_GRACE_MS) {
+				obs_log(LOG_WARNING, "Multistream output: connection lost (%s), trying again every %d seconds",
+					self->error_.toUtf8().constData(), int(RETRY_MS / 1000));
+				self->error_.clear();
+			} else if (self->wanted_) {
 				self->error_ += " " + mt("Relay.RetryEvery");
+			}
 		}
 	});
 }
@@ -369,11 +484,17 @@ void RelayOutput::onStop(void *data, calldata_t *cd)
 void RelayOutput::onReconnect(void *data, calldata_t *)
 {
 	auto *self = static_cast<RelayOutput *>(data);
-	onUi([self]() { self->reconnecting_ = true; });
+	self->queueCallback([self]() {
+		if (self->wanted_ && !self->stopping_)
+			self->reconnecting_ = true;
+	});
 }
 
 void RelayOutput::onReconnectSuccess(void *data, calldata_t *)
 {
 	auto *self = static_cast<RelayOutput *>(data);
-	onUi([self]() { self->reconnecting_ = false; });
+	self->queueCallback([self]() {
+		if (self->wanted_ && !self->stopping_)
+			self->reconnecting_ = false;
+	});
 }

@@ -4,8 +4,11 @@
 
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 
 #include <functional>
+#include <atomic>
+#include <memory>
 
 // A second stream output to Multistream, for when OBS's own stream goes to
 // Twitch (Enhanced Broadcasting keeps working): it starts and stops with
@@ -44,8 +47,13 @@ private:
 	void releaseAll();
 	bool startOutput();
 	void stopOutput();
+	void queueCallback(std::function<void()> fn);
 	QString sig() const;
 	void save() const;
+	// An encoder that stopped with -6/-8 is skipped from now on (per family, so
+	// both NVENC ids go together). Returns true when another one is left.
+	bool noteEncoderFailed();
+	bool anotherEncoderLeft() const;
 
 	static void onStart(void *data, calldata_t *cd);
 	static void onStop(void *data, calldata_t *cd);
@@ -73,10 +81,23 @@ private:
 	bool wanted_ = false;
 	bool manual_ = false;
 	bool attempting_ = false;
+	// A cancelled attempt must settle before another Start can reuse its output.
+	bool stopping_ = false;
+	// OBS signals run off-thread. Queued work from a finished attempt (or
+	// shutdown) must not touch a later attempt, or a destroyed RelayOutput.
+	std::shared_ptr<std::atomic<unsigned long long>> callbackEpoch_ =
+		std::make_shared<std::atomic<unsigned long long>>(0);
 	bool sending_ = false;
 	bool reconnecting_ = false;
+	bool dropped_ = false;   // was sending, lost the link: tick() is bringing it back
+	qint64 droppedAt_ = 0;
 	QString error_;
+	QString note_;   // shown while sending: the encoder was switched
 	QString encoder_;
+	// Encoder families that failed this OBS session, and the picture/bitrate
+	// they failed with: a different one gives them another chance.
+	QStringList failedEncoders_;
+	QString failedSig_;
 	qint64 lastTry_ = 0;
 	qint64 startedAt_ = 0;
 };
