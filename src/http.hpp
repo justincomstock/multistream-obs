@@ -18,6 +18,9 @@ struct HttpResult {
 	int status = 0;
 	QByteArray body;
 	QByteArray contentType;
+	// Why there was no answer when status is 0 (for the OBS log): a system
+	// error code or a short reason. Empty when the server answered.
+	QByteArray error;
 };
 
 struct HttpRequestSpec {

@@ -48,6 +48,7 @@ target_sources(
     src/plugin-main.cpp
     src/dock.cpp
     src/bridge.cpp
+    src/events.cpp
     src/games.cpp
     src/http.cpp
     src/obs-state.cpp
@@ -59,6 +60,7 @@ target_sources(
     src/vertical/item-menu.cpp
     src/vertical/items.cpp
     src/vertical/migrate.cpp
+    src/vertical/motion.cpp
     src/vertical/record.cpp
     src/vertical/preview.cpp
     src/vertical/theme.cpp

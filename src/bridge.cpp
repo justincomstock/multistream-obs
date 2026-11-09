@@ -1,5 +1,6 @@
 #include "bridge.hpp"
 
+#include "events.hpp"
 #include "games.hpp"
 #include "http.hpp"
 #include "i18n.hpp"
@@ -336,7 +337,8 @@ void Bridge::servePage(QTcpSocket *s, const QByteArray &rawPath)
 				f.write(body);
 		} else {
 			QFile f(cacheFile);
-			if (f.open(QIODevice::ReadOnly))
+			const bool cached = f.open(QIODevice::ReadOnly);
+			if (cached)
 				body = f.readAll();
 			else if (index)
 				body = fallbackPage();
@@ -344,6 +346,11 @@ void Bridge::servePage(QTcpSocket *s, const QByteArray &rawPath)
 				reply(sp, 404, "text/plain", "Not found");
 				return;
 			}
+			if (index)
+				msevents::note("dock-offline",
+					       QString("dock page not fetched (%1), showing %2")
+						       .arg(res.status ? QString("HTTP %1").arg(res.status) : QString::fromUtf8(res.error))
+						       .arg(QString::fromUtf8(cached ? "the saved copy" : "the offline page")));
 		}
 		if (index) {
 			QJsonObject cfg;
@@ -383,9 +390,17 @@ void Bridge::proxy(QTcpSocket *s, const HttpRequest &r, const QString &url, bool
 	QPointer<QTcpSocket> sp(s);
 	const bool poll = cloud && r.path == "/cloud/api/auth/app-link/poll";
 	const bool logout = cloud && r.path == "/cloud/api/auth/logout";
-	http_->send(req, server_, [this, sp, cloud, poll, logout](const HttpResult &res) {
+	const QByteArray method = r.method;
+	const QByteArray path = r.path.left(120);
+	http_->send(req, server_, [this, sp, cloud, poll, logout, method, path](const HttpResult &res) {
 		const int code = res.status;
 		if (code == 0) {
+			// The reason (no internet, firewall, a secure-connection problem)
+			// goes in the OBS log and to the Server health page. Path only:
+			// never the query or the token.
+			msevents::note(cloud ? "cant-reach-multistream" : "cant-reach-app",
+				       QString("%1 %2: %3").arg(QString::fromUtf8(method), QString::fromUtf8(path),
+							   QString::fromUtf8(res.error.isEmpty() ? QByteArray("no answer") : res.error)));
 			QJsonObject o = errorJson(cloud ? mt("Bridge.CantReach") : mt("Bridge.AppNotOpen"));
 			o["unreachable"] = true;
 			replyJson(sp, 502, o);
@@ -401,13 +416,16 @@ void Bridge::proxy(QTcpSocket *s, const HttpRequest &r, const QString &url, bool
 			QJsonObject o = QJsonDocument::fromJson(body).object();
 			if (o.contains("token")) {
 				saveToken(o.value("token").toString());
+				obs_log(LOG_INFO, "[account] signed in to Multistream");
 				o.remove("token");
 				o["linked"] = true;
 				body = QJsonDocument(o).toJson(QJsonDocument::Compact);
 			}
 		}
-		if (logout)
+		if (logout) {
 			saveToken("");
+			obs_log(LOG_INFO, "[account] signed out (from the dock)");
+		}
 		reply(sp, code, ctype, body);
 	});
 }
@@ -430,6 +448,17 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		replyJson(s, 200, o);
 		return;
 	}
+	// Problems noted since the last time the dock page asked, for it to
+	// send to multistream.gg (msevents). Taking them clears the list.
+	if (p == "events" && r.method == "GET") {
+		QJsonObject o;
+		o["plugin"] = PLUGIN_VERSION;
+		o["obs"] = obs_get_version_string();
+		o["os"] = msevents::osName();
+		o["events"] = msevents::take();
+		replyJson(s, 200, o);
+		return;
+	}
 	if (p == "games" && r.method == "GET") {
 		replyJson(s, 200, games::state());
 		return;
@@ -440,6 +469,7 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 	}
 	QString error;
 	if (p == "start") {
+		obs_log(LOG_INFO, "[dock] Go live pressed%s", obs_frontend_streaming_active() ? " (already live)" : "");
 		replyJson(s, 200, okJson());
 		// After the answer: OBS may ask "Are you sure?" in a dialog.
 		QTimer::singleShot(0, []() {
@@ -447,25 +477,43 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 				obs_frontend_streaming_start();
 		});
 	} else if (p == "stop") {
+		obs_log(LOG_INFO, "[dock] End pressed%s", obs_frontend_streaming_active() ? "" : " (wasn't live)");
 		replyJson(s, 200, okJson());
 		QTimer::singleShot(0, []() {
 			if (obs_frontend_streaming_active())
 				obs_frontend_streaming_stop();
 		});
 	} else if (p == "service") {
-		if (obsstate::setService(in.value("server").toString(), in.value("key").toString(), error))
+		// The host only, never the key.
+		const QString host = QUrl(in.value("server").toString().replace("rtmps://", "http://").replace("rtmp://", "http://")).host();
+		if (obsstate::setService(in.value("server").toString(), in.value("key").toString(), error)) {
+			obs_log(LOG_INFO, "[dock] OBS's stream server set to %s", host.toUtf8().constData());
 			replyJson(s, 200, okJson());
-		else
+		} else {
+			obs_log(LOG_WARNING, "[dock] couldn't set OBS's stream server to %s: %s", host.toUtf8().constData(),
+				error.toUtf8().constData());
 			replyJson(s, 409, errorJson(error));
-	} else if (p == "service/restore") {
-		if (obsstate::restoreService(error))
+		}
+	} else if (p == "service/twitch") {
+		if (obsstate::setTwitchService(in.value("key").toString(), error)) {
+			obs_log(LOG_INFO, "[dock] OBS set to stream to Twitch");
 			replyJson(s, 200, okJson());
-		else
+		} else {
+			obs_log(LOG_WARNING, "[dock] couldn't set OBS to Twitch: %s", error.toUtf8().constData());
+			replyJson(s, 409, errorJson(error));
+		}
+	} else if (p == "service/restore") {
+		if (obsstate::restoreService(error)) {
+			obs_log(LOG_INFO, "[dock] OBS's previous stream server put back");
+			replyJson(s, 200, okJson());
+		} else
 			replyJson(s, 409, errorJson(error));
 	} else if (p == "encoder") {
-		if (obsstate::setEncoder(in.value("bitrate").toInt(), in.value("keyintSec").toInt(), error))
+		if (obsstate::setEncoder(in.value("bitrate").toInt(), in.value("keyintSec").toInt(), error)) {
+			obs_log(LOG_INFO, "[dock] OBS's encoder set to %d kbps, keyframe every %d s", in.value("bitrate").toInt(),
+				in.value("keyintSec").toInt());
 			replyJson(s, 200, okJson());
-		else
+		} else
 			replyJson(s, 409, errorJson(error));
 	} else if (p == "relay") {
 		relay_->configure(in.value("enabled").toBool(), in.value("server").toString(), in.value("key").toString(),
@@ -507,6 +555,7 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		replyJson(s, 200, games::state());
 	} else if (p == "signout") {
 		saveToken("");
+		obs_log(LOG_INFO, "[account] signed out (the website no longer accepts this sign-in)");
 		replyJson(s, 200, okJson());
 	} else {
 		replyJson(s, 404, errorJson(mt("Bridge.NoSuchAction")));

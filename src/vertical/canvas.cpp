@@ -1,6 +1,7 @@
 #include "canvas.hpp"
 #include "../i18n.hpp"
 #include "record.hpp"
+#include "../obs-state.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -1026,6 +1027,11 @@ QJsonObject VerticalCanvas::state() const
 	o["width"] = width_;
 	o["height"] = height_;
 	o["scene"] = scene_;
+	// What the vertical scene shows (0: a black screen on TikTok and the like).
+	if (obs_scene_t *s = findScene(scene_)) {
+		o["shown"] = obsstate::shownSources(s);
+		obs_scene_release(s);
+	}
 	o["scenes"] = sceneList();
 	o["followMain"] = followMain_;
 	o["audio"] = audio_.state();

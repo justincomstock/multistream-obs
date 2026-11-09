@@ -1,7 +1,9 @@
 #include "obs-state.hpp"
 
+#include "events.hpp"
 #include "i18n.hpp"
 
+#include <plugin-support.h>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/config-file.h>
@@ -99,6 +101,20 @@ void onOutputStop(void *, calldata_t *cd)
 	outCode = calldata_int(cd, "code");
 }
 
+// OBS retrying the main stream after the connection dropped. Logged so the
+// OBS log shows each drop and whether it came back.
+std::atomic<int> reconnects{0};
+void onOutputReconnect(void *, calldata_t *)
+{
+	const int n = ++reconnects;
+	msevents::note("stream-reconnecting", QString("connection dropped, OBS is reconnecting (drop %1 this stream)").arg(n));
+}
+
+void onOutputReconnected(void *, calldata_t *)
+{
+	obs_log(LOG_INFO, "[stream] reconnected");
+}
+
 void unwatch()
 {
 	if (!rt.watched)
@@ -107,6 +123,8 @@ void unwatch()
 		signal_handler_t *sh = obs_output_get_signal_handler(old);
 		signal_handler_disconnect(sh, "starting", onOutputStarting, nullptr);
 		signal_handler_disconnect(sh, "stop", onOutputStop, nullptr);
+		signal_handler_disconnect(sh, "reconnect", onOutputReconnect, nullptr);
+		signal_handler_disconnect(sh, "reconnect_success", onOutputReconnected, nullptr);
 		obs_output_release(old);
 	}
 	obs_weak_output_release(rt.watched);
@@ -124,6 +142,8 @@ void watchOutput()
 		signal_handler_t *sh = obs_output_get_signal_handler(out);
 		signal_handler_connect(sh, "starting", onOutputStarting, nullptr);
 		signal_handler_connect(sh, "stop", onOutputStop, nullptr);
+		signal_handler_connect(sh, "reconnect", onOutputReconnect, nullptr);
+		signal_handler_connect(sh, "reconnect_success", onOutputReconnected, nullptr);
 		rt.watched = obs_output_get_weak_output(out);
 	}
 	obs_output_release(out);
@@ -145,6 +165,11 @@ void noteStop(int code, bool started)
 	rt.stopCode = code;
 	rt.stopError = lastOutputError();
 	rt.stopStarted = started;
+	// Why the stream stopped or never started, in the OBS log. OBS's
+	// last-error text never carries the stream key.
+	msevents::note(started ? "stream-stopped" : "stream-didnt-start",
+		       rt.stopError.isEmpty() ? QString("code %1").arg(code)
+					       : QString("code %1: %2").arg(code).arg(rt.stopError.left(300)));
 }
 
 // The host in "rtmp://host:1935/live".
@@ -205,6 +230,7 @@ void obsstate::onEvent(int event)
 		rt.reached = false;
 		outCode = 0;
 		outStarting = false;
+		reconnects = 0;
 		watchOutput();
 		// OBS starts the output right after this event. When that fails at
 		// once (an encoder that won't open), OBS shows its own message and
@@ -221,6 +247,7 @@ void obsstate::onEvent(int event)
 		rt.reached = true;
 		rt.stopAt = 0;
 		rt.startedAt = now();
+		obs_log(LOG_INFO, "[stream] live");
 		rt.lastBytes = 0;
 		rt.lastAt = 0;
 		rt.kbps = 0;
@@ -267,6 +294,46 @@ void obsstate::tick()
 	obs_output_release(out);
 }
 
+namespace {
+void countShown(obs_scene_t *scene, int &n, int depth)
+{
+	if (!scene || depth > 8)
+		return;
+	struct Ctx {
+		int *n;
+		int depth;
+	} ctx{&n, depth};
+	obs_scene_enum_items(
+		scene,
+		[](obs_scene_t *, obs_sceneitem_t *item, void *p) {
+			auto *c = static_cast<Ctx *>(p);
+			if (!obs_sceneitem_visible(item))
+				return true;
+			if (obs_sceneitem_is_group(item)) {
+				countShown(obs_sceneitem_group_get_scene(item), *c->n, c->depth + 1);
+				return true;
+			}
+			obs_source_t *src = obs_sceneitem_get_source(item);
+			if (obs_scene_t *nested = obs_scene_from_source(src)) {
+				countShown(nested, *c->n, c->depth + 1);
+				return true;
+			}
+			if ((obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) && obs_source_get_width(src) > 0 &&
+			    obs_source_get_height(src) > 0)
+				++*c->n;
+			return true;
+		},
+		&ctx);
+}
+} // namespace
+
+int obsstate::shownSources(obs_scene_t *scene)
+{
+	int n = 0;
+	countShown(scene, n, 0);
+	return n;
+}
+
 QJsonObject obsstate::snapshot()
 {
 	QJsonObject o;
@@ -306,6 +373,7 @@ QJsonObject obsstate::snapshot()
 		so["service"] = str(obs_data_get_string(s, "service"));
 		so["server"] = str(obs_data_get_string(s, "server"));
 		so["key"] = str(obs_data_get_string(s, "key"));
+		so["canSetTwitch"] = true;
 		so["url"] = str(obs_service_get_connect_info(svc, OBS_SERVICE_CONNECT_INFO_SERVER_URL));
 		obs_data_release(s);
 		o["service"] = so;
@@ -332,6 +400,16 @@ QJsonObject obsstate::snapshot()
 		pc["fps"] = obs_get_active_fps();
 		pc["memoryMB"] = double(os_get_proc_resident_size() / (1024 * 1024));
 		o["pc"] = pc;
+	}
+
+	// The scene on the stream: the dock warns before going live with a
+	// black screen.
+	if (obs_source_t *cur = obs_frontend_get_current_scene()) {
+		QJsonObject sc;
+		sc["name"] = str(obs_source_get_name(cur));
+		sc["shown"] = shownSources(obs_scene_from_source(cur));
+		o["scene"] = sc;
+		obs_source_release(cur);
 	}
 
 	obs_video_info ovi = {};
@@ -377,6 +455,33 @@ QJsonObject obsstate::snapshot()
 		o["encoder"] = e;
 	}
 	return o;
+}
+
+bool obsstate::setTwitchService(const QString &key, QString &error)
+{
+	if (obs_frontend_streaming_active()) {
+		error = mt("Obs.EndStreamFirst");
+		return false;
+	}
+	if (key.isEmpty()) {
+		error = mt("Obs.ServerKeyMissing");
+		return false;
+	}
+	const QByteArray k = key.toUtf8();
+	obs_data_t *s = obs_data_create();
+	obs_data_set_string(s, "service", "Twitch");
+	obs_data_set_string(s, "server", "auto");
+	obs_data_set_string(s, "key", k.constData());
+	obs_service_t *svc = obs_service_create("rtmp_common", "default_service", s, nullptr);
+	obs_data_release(s);
+	if (!svc) {
+		error = mt("Obs.NoCustomService");
+		return false;
+	}
+	obs_frontend_set_streaming_service(svc);
+	obs_frontend_save_streaming_service();
+	obs_service_release(svc);
+	return true;
 }
 
 bool obsstate::setService(const QString &server, const QString &key, QString &error)

@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "bridge.hpp"
 #include "dock.hpp"
+#include "events.hpp"
 #include "games.hpp"
 #include "obs-state.hpp"
 #include "relay-output.hpp"
@@ -151,7 +152,8 @@ bool obs_module_load(void)
 #ifdef _WIN32
 	notePluginFolder();
 #endif
-	obs_log(LOG_INFO, "loaded (version %s)", PLUGIN_VERSION);
+	obs_log(LOG_INFO, "loaded (version %s, OBS %s, %s)", PLUGIN_VERSION, obs_get_version_string(),
+		msevents::osName().toUtf8().constData());
 	return true;
 }
 

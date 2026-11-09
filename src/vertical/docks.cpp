@@ -3,6 +3,7 @@
 #include "canvas.hpp"
 #include "../i18n.hpp"
 #include "item-menu.hpp"
+#include "motion.hpp"
 #include "preview.hpp"
 #include "record.hpp"
 #include "theme.hpp"
@@ -97,6 +98,32 @@ QString shownMixer;
 void warn(const QString &error)
 {
 	QMessageBox::warning(scenesDock, QStringLiteral("Multistream Vertical"), error);
+}
+
+// A button whose words change keeps the width of the longest of them, so the
+// row doesn't shift when Rec becomes Stop. (Icon-only buttons have no words.)
+void lockWidth(QToolButton *b, const QStringList &words)
+{
+	if (b->toolButtonStyle() == Qt::ToolButtonIconOnly) {
+		b->setMinimumWidth(0);
+		return;
+	}
+	const QFontMetrics fm(b->font());
+	const int extra = b->sizeHint().width() - fm.horizontalAdvance(b->text());
+	int longest = 0;
+	for (const QString &w : words)
+		longest = std::max(longest, fm.horizontalAdvance(w));
+	b->setMinimumWidth(extra + longest);
+}
+
+// New words on a button: it keeps its width, and the words fade in.
+void setWords(QToolButton *b, const QString &text, const QStringList &all)
+{
+	lockWidth(b, all);
+	if (b->text() == text)
+		return;
+	b->setText(text);
+	vmotion::dip(b);
 }
 
 // pill: the button's look in theme.cpp (ghost, rec, soft, round, square, key).
@@ -674,10 +701,14 @@ void refreshImport()
 		lines << mt("Vertical.LuaRunning");
 	if (aitum)
 		lines << mt("Vertical.AitumFound");
-	importText->setText(lines.join("<br><br>"));
-	importAitumButton->setVisible(aitum);
-	importLuaButton->setVisible(lua);
-	importBox->setVisible(!lines.isEmpty());
+	// When there is nothing to offer the box folds away still showing what it
+	// last showed, rather than emptying first.
+	if (!lines.isEmpty()) {
+		importText->setText(lines.join("<br><br>"));
+		importAitumButton->setVisible(aitum);
+		importLuaButton->setVisible(lua);
+	}
+	vmotion::foldTo(importBox, !lines.isEmpty());
 }
 
 // ---- Vertical Sources --------------------------------------------------------
@@ -1646,7 +1677,7 @@ void refreshRecord()
 	const QJsonObject st = canvas->recorder->state();
 	const bool rec = st.value("recording").toBool(), rep = st.value("replay").toBool();
 	recButton->setChecked(rec);
-	recButton->setText(rec ? mt("Vertical.Stop") : mt("Vertical.Rec"));
+	setWords(recButton, rec ? mt("Vertical.Stop") : mt("Vertical.Rec"), {mt("Vertical.Rec"), mt("Vertical.Stop")});
 	if (recButton->property("recIcon").toBool() != rec || recButton->icon().isNull()) {
 		recButton->setIcon(vtheme::dotIcon(rec ? vtheme::ROSE_TEXT : vtheme::ROSE, rec));
 		recButton->setProperty("recIcon", rec);
@@ -1654,13 +1685,16 @@ void refreshRecord()
 	recButton->setToolTip(rec ? mt("Vertical.RecordingTo").arg(st.value("lastFile").toString())
 				  : mt("Vertical.RecordInto").arg(st.value("folder").toString()));
 	replayButton->setChecked(rep);
-	replayButton->setText(rep && recordWords == 2 ? mt("Vertical.ReplayOn") : mt("Vertical.Replay"));
+	setWords(replayButton, rep && recordWords == 2 ? mt("Vertical.ReplayOn") : mt("Vertical.Replay"),
+		 recordWords == 2 ? QStringList{mt("Vertical.Replay"), mt("Vertical.ReplayOn")} : QStringList{mt("Vertical.Replay")});
 	saveButton->setText(recordWords == 2 ? mt("Vertical.SaveClip") : mt("Vertical.Save"));
 	replayButton->setToolTip(rep ? mt("Vertical.ReplayRunningTip") : mt("Vertical.ReplayStartTip"));
 	saveButton->setEnabled(rep);
 	const bool paused = st.value("paused").toBool();
-	pauseButton->setVisible(rec);
-	pauseButton->setText(recordWords == 2 ? mt(paused ? "Vertical.Resume" : "Vertical.Pause") : (paused ? "\u25b6" : "\u275a\u275a"));
+	setWords(pauseButton, recordWords == 2 ? mt(paused ? "Vertical.Resume" : "Vertical.Pause") : (paused ? "\u25b6" : "\u275a\u275a"),
+		 recordWords == 2 ? QStringList{mt("Vertical.Pause"), mt("Vertical.Resume")}
+				  : QStringList{QStringLiteral("\u25b6"), QStringLiteral("\u275a\u275a")});
+	vmotion::foldTo(pauseButton, rec, true); // it comes and goes with the recording, sideways
 	pauseButton->setToolTip(mt(paused ? "Vertical.PausedTip" : "Vertical.PauseTip"));
 	if (paused)
 		recButton->setToolTip(mt("Vertical.PausedFile").arg(st.value("lastFile").toString()));
@@ -1674,15 +1708,19 @@ void refreshRecord()
 			text += QString(" · <a href=\"%1\">%2</a>").arg(QFileInfo(file).absolutePath().toHtmlEscaped(), mt("Vertical.OpenFolder").toHtmlEscaped());
 		noticeLabel->setText(text);
 		noticeLabel->setToolTip(file.isEmpty() ? st.value("notice").toString() : file);
-		noticeLabel->setVisible(true);
+		vmotion::foldTo(noticeLabel, true, true);
 		QTimer::singleShot(file.isEmpty() ? 12000 : 8000, noticeLabel, [seq]() {
 			if (noticeLabel && shownNotice == seq)
-				noticeLabel->setVisible(false);
+				vmotion::foldTo(noticeLabel, false, true);
 		});
 	}
 	const QString err = st.value("error").toString();
-	recLabel->setText(err.isEmpty() || rec || rep ? QString() : mt("Vertical.NotRecording"));
+	// "Not recording" folds in and out; its words stay while it leaves.
+	const bool notRec = !(err.isEmpty() || rec || rep);
+	if (notRec)
+		recLabel->setText(mt("Vertical.NotRecording"));
 	recLabel->setToolTip(err);
+	vmotion::foldTo(recLabel, notRec, true);
 	if (err.isEmpty())
 		shownRecError.clear();
 	else if (err != shownRecError) {
@@ -1731,7 +1769,11 @@ void refreshLive()
 		text = mt("Vertical.Off");
 		tip = mt("Vertical.OffTip");
 	}
-	liveLabel->setText("● " + text);
+	// The pill's words fade over (a native picture sits below it, not under it).
+	if (const QString shownText = "● " + text; liveLabel->text() != shownText) {
+		liveLabel->setText(shownText);
+		vmotion::dip(liveLabel);
+	}
 	liveLabel->setToolTip(tip);
 	vtheme::setProp(liveLabel, "tone", tone);
 	// Vertical Scenes says ON AIR only while the vertical stream is out.
@@ -1845,13 +1887,15 @@ void showOnFirstRun()
 		obs_data_set_bool(d, key.constData(), true);
 		saved = true;
 	}
-	// A first run: the picture is the tab in front, the tabs get 60% of the
-	// column (OBS would give the Multistream dock above most of it), and
+	// A first run: the picture is the tab in front, the Multistream dock
+	// above gets 60% of the column (its sign-in, the code to compare and the
+	// platform list need the height; squeezed, a newcomer saw only a button)
+	// and the tabs the rest, and
 	// the column widens to 500 (at most 2/5 of the window), so the four
 	// tab names read in full rather than "Scenes ...", which looks like
 	// OBS's own Scenes. resizeDocks does nothing in OBS's window, so once it
-	// is on screen the preview briefly asks for that size as its minimum
-	// and the docks around it give way; then it lets go, keeping the size.
+	// is on screen each dock briefly asks for its size as its minimum and
+	// the docks around it give way; then they let go, keeping the sizes.
 	if (previewPlaced && previewDw && main) {
 		QTimer::singleShot(0, previewDw, [previewDw]() { previewDw->raise(); });
 		QPointer<QDockWidget> pv = previewDw;
@@ -1864,15 +1908,23 @@ void showOnFirstRun()
 			const int h = ms->height() + pv->height();
 			if (h < 300)
 				return;
+			// The Multistream dock asks for its 60% (the tabs give way), the
+			// preview for the column's width.
+			QPointer<QWidget> msContent = ms->widget();
+			const QSize msBefore = msContent ? msContent->minimumSize() : QSize();
+			if (msContent) {
+				const int msChrome = ms->height() - msContent->height();
+				msContent->setMinimumHeight(std::max(msBefore.height(), h * 3 / 5 - msChrome));
+			}
 			const QSize before = content->minimumSize();
-			const int chrome = pv->height() - content->height();
-			content->setMinimumHeight(std::max(before.height(), h * 3 / 5 - chrome));
 			const int w = std::min(500, main->width() * 2 / 5);
 			if (w > pv->width())
 				content->setMinimumWidth(std::max(before.width(), w - (pv->width() - content->width())));
-			QTimer::singleShot(800, content, [content, before, pv, ms]() {
+			QTimer::singleShot(800, content, [content, before, msContent, msBefore, pv, ms]() {
 				if (content)
 					content->setMinimumSize(before);
+				if (msContent)
+					msContent->setMinimumSize(msBefore);
 				obs_log(LOG_INFO, "Vertical docks: Multistream %d, tabs %dx%d", ms ? ms->height() : -1,
 					pv ? pv->width() : -1, pv ? pv->height() : -1);
 			});

@@ -1,5 +1,6 @@
 #include "relay-output.hpp"
 
+#include "events.hpp"
 #include "i18n.hpp"
 
 #include <obs-module.h>
@@ -420,6 +421,7 @@ void RelayOutput::onStart(void *data, calldata_t *)
 				obs_output_force_stop(self->output_);
 			return;
 		}
+		obs_log(LOG_INFO, "%s: sending", self->name_.toUtf8().constData());
 		self->sending_ = true;
 		self->reconnecting_ = false;
 		self->dropped_ = false;
@@ -457,6 +459,12 @@ void RelayOutput::onStop(void *data, calldata_t *cd)
 			self->error_ = stopReason(code);
 			if (!detail.isEmpty())
 				self->error_ += " " + detail;
+			// Every stop with an error goes in the OBS log and to the Server
+			// health page (msevents), not only the first minutes of a drop.
+			msevents::note(code == -6 || code == -8 ? "output-encoder-failed"
+						  : wasSending          ? "output-dropped"
+									: "output-didnt-start",
+				       QString("%1: code %2: %3").arg(self->name_).arg(code).arg(self->error_));
 			if (code == -6 || code == -8) {
 				// The encoder itself is the problem (a graphics card out of
 				// encoder sessions, say): the next try builds with the next
@@ -485,8 +493,11 @@ void RelayOutput::onReconnect(void *data, calldata_t *)
 {
 	auto *self = static_cast<RelayOutput *>(data);
 	self->queueCallback([self]() {
-		if (self->wanted_ && !self->stopping_)
+		if (self->wanted_ && !self->stopping_) {
+			if (!self->reconnecting_)
+				obs_log(LOG_WARNING, "%s: connection dropped, reconnecting", self->name_.toUtf8().constData());
 			self->reconnecting_ = true;
+		}
 	});
 }
 
@@ -494,7 +505,9 @@ void RelayOutput::onReconnectSuccess(void *data, calldata_t *)
 {
 	auto *self = static_cast<RelayOutput *>(data);
 	self->queueCallback([self]() {
-		if (self->wanted_ && !self->stopping_)
+		if (self->wanted_ && !self->stopping_) {
+			obs_log(LOG_INFO, "%s: reconnected", self->name_.toUtf8().constData());
 			self->reconnecting_ = false;
+		}
 	});
 }

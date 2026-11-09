@@ -38,12 +38,16 @@ HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
 	HttpResult res;
 	const QUrl u(spec.url);
 	const bool https = u.scheme() == "https";
-	if (!session || !u.isValid() || (!https && u.scheme() != "http"))
+	if (!session || !u.isValid() || (!https && u.scheme() != "http")) {
+		res.error = session ? "bad address" : "WinHTTP not available";
 		return res;
+	}
 	HINTERNET con = WinHttpConnect(session, u.host().toStdWString().c_str(),
 				       INTERNET_PORT(u.port(https ? 443 : 80)), 0);
-	if (!con)
+	if (!con) {
+		res.error = "WinHTTP error " + QByteArray::number(qulonglong(GetLastError()));
 		return res;
+	}
 	QString target = u.path(QUrl::FullyEncoded);
 	if (target.isEmpty())
 		target = "/";
@@ -53,6 +57,7 @@ HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
 					   target.toStdWString().c_str(), nullptr, WINHTTP_NO_REFERER,
 					   WINHTTP_DEFAULT_ACCEPT_TYPES, https ? WINHTTP_FLAG_SECURE : 0);
 	if (!req) {
+		res.error = "WinHTTP error " + QByteArray::number(qulonglong(GetLastError()));
 		WinHttpCloseHandle(con);
 		return res;
 	}
@@ -110,6 +115,7 @@ HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
 				break;
 			if (body.size() + qsizetype(avail) > MAX_RESPONSE) {
 				ok = false;
+				SetLastError(0);
 				break;
 			}
 			const qsizetype at = body.size();
@@ -129,6 +135,10 @@ HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
 		}
 	}
 
+	// Read before the handles close (closing resets the thread's last error).
+	// 12002 timed out, 12007 name not found, 12029 couldn't connect,
+	// 12175 secure connection failed: winhttp.h has the full list.
+	const DWORD failCode = ok ? 0 : GetLastError();
 	{
 		std::lock_guard<std::mutex> g(lock);
 		// Shutdown may have closed it already, to cut the wait short.
@@ -136,8 +146,10 @@ HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
 			WinHttpCloseHandle(req);
 	}
 	WinHttpCloseHandle(con);
-	if (!ok)
+	if (!ok) {
 		res = HttpResult();
+		res.error = failCode ? "WinHTTP error " + QByteArray::number(qulonglong(failCode)) : QByteArray("answer too big or cut off");
+	}
 	return res;
 }
 
@@ -229,11 +241,15 @@ HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
 {
 	HttpResult res;
 	const QUrl u(spec.url);
-	if (stopping || !u.isValid() || (u.scheme() != "https" && u.scheme() != "http"))
+	if (stopping || !u.isValid() || (u.scheme() != "https" && u.scheme() != "http")) {
+		res.error = stopping ? "shutting down" : "bad address";
 		return res;
+	}
 	CURL *c = curl_easy_init();
-	if (!c)
+	if (!c) {
+		res.error = "curl not available";
 		return res;
+	}
 	const QByteArray url = u.toEncoded();
 	Reply reply;
 	reply.stopping = &stopping;
@@ -276,6 +292,9 @@ HttpResult HttpClient::Impl::run(const HttpRequestSpec &spec)
 		res.body = reply.body;
 		if (ct)
 			res.contentType = QByteArray(ct);
+	} else {
+		res.error = reply.tooBig ? QByteArray("answer too big")
+					 : QByteArray("curl ") + QByteArray::number(int(rc)) + ": " + curl_easy_strerror(rc);
 	}
 	curl_slist_free_all(head);
 	curl_easy_cleanup(c);
@@ -358,6 +377,8 @@ void HttpClient::send(const HttpRequestSpec &spec, QObject *context, std::functi
 			res.status = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 			res.body = rep->readAll();
 			res.contentType = rep->header(QNetworkRequest::ContentTypeHeader).toByteArray();
+		} else {
+			res.error = rep->errorString().left(200).toUtf8();
 		}
 		if (ctx)
 			done(res);
