@@ -1,6 +1,7 @@
 #include "canvas.hpp"
 #include "../i18n.hpp"
 #include "record.hpp"
+#include "virtualcam.hpp"
 #include "../obs-state.hpp"
 
 #include <obs-module.h>
@@ -1037,6 +1038,8 @@ QJsonObject VerticalCanvas::state() const
 	o["audio"] = audio_.state();
 	if (recorder)
 		o["record"] = recorder->state();
+	if (virtualcam)
+		o["virtualcam"] = virtualcam->state();
 	o["dualFormat"] = dualFormatState();
 	return o;
 }

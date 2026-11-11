@@ -64,6 +64,7 @@ target_sources(
     src/vertical/record.cpp
     src/vertical/preview.cpp
     src/vertical/theme.cpp
+    src/vertical/virtualcam.cpp
     src/vertical/websocket.cpp
 )
 

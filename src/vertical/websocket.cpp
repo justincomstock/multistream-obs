@@ -4,6 +4,7 @@
 #include "../i18n.hpp"
 #include "docks.hpp"
 #include "record.hpp"
+#include "virtualcam.hpp"
 #include "../relay-output.hpp"
 
 #include <obs-module.h>
@@ -359,6 +360,20 @@ const Request REQUESTS[] = {
 	 [](const QJsonObject &) {
 		 QString error;
 		 return canvas->recorder->saveReplay(error) ? QJsonObject() : fail(error);
+	 }},
+	// ---- the vertical picture on OBS Virtual Camera ----
+	{"virtualcam_state", [](const QJsonObject &) { return canvas->virtualcam->state(); }},
+	// {switch}: true takes OBS's camera over from the normal picture.
+	{"virtualcam_start",
+	 [](const QJsonObject &in) {
+		 QString error;
+		 return canvas->virtualcam->start(error, in.value("switch").toBool(false)) ? canvas->virtualcam->state()
+											      : fail(error);
+	 }},
+	{"virtualcam_stop",
+	 [](const QJsonObject &) {
+		 canvas->virtualcam->stop();
+		 return canvas->virtualcam->state();
 	 }},
 	// ---- moving in from Aitum Vertical / the Vertical tool; Dual Format ----
 	{"import_state", [](const QJsonObject &) { return canvas->importState(); }},

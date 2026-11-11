@@ -3,6 +3,7 @@
 #include "audio-mix.hpp"
 
 class VerticalRecorder;
+class VerticalVirtualCam;
 
 #include <obs.h>
 
@@ -155,6 +156,8 @@ public:
 	quint64 version() const { return version_; }
 	// Its recording and replay buffer (record.hpp), set by the plugin.
 	VerticalRecorder *recorder = nullptr;
+	// Its picture on OBS Virtual Camera (virtualcam.hpp), set by the plugin.
+	VerticalVirtualCam *virtualcam = nullptr;
 	// Called when the scene on air changes: (scene, previous).
 	std::function<void(const QString &, const QString &)> onSceneChanged;
 

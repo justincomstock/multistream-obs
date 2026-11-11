@@ -38,6 +38,8 @@ QToolButton[pill="ghost"], QToolButton[pill="rec"] { background: transparent; bo
 QToolButton[pill="ghost"]:hover, QToolButton[pill="rec"]:hover { background: rgba(255,255,255,12); }
 QToolButton[pill="ghost"]:disabled { border-color: rgba(255,255,255,18); }
 QToolButton[pill="ghost"]:checked { background: rgba(169,156,255,36); border-color: rgba(169,156,255,90); color: #d6d0ff; }
+QToolButton#verticalCam:checked { background: #7a68f0; border-color: #a99cff; color: #ffffff; }
+QToolButton#verticalCam:checked:hover { background: #8a7af5; }
 QToolButton[pill="rec"]:checked { background: rgba(255,77,109,26); border-color: rgba(255,77,109,100); color: #ff9aab; }
 QToolButton[pill="soft"], QPushButton[pill="soft"] { background: rgba(169,156,255,36); color: #d6d0ff; border-radius: 11px; padding: 0 10px; min-height: 22px; max-height: 22px; }
 QToolButton[pill="soft"]:hover, QPushButton[pill="soft"]:hover { background: rgba(169,156,255,56); }
@@ -213,6 +215,10 @@ QIcon lineIcon(const QString &name)
 		p.drawLine(QPointF(7, 2.5), QPointF(7, 9));
 		p.drawPolyline(QPolygonF({QPointF(4, 6.5), QPointF(7, 9.5), QPointF(10, 6.5)}));
 		p.drawLine(QPointF(3, 11.8), QPointF(11, 11.8));
+	} else if (name == "camera") {
+		// A small video camera: body and lens.
+		p.drawRoundedRect(QRectF(1.5, 4, 8, 6.5), 1.5, 1.5);
+		p.drawPolygon(QPolygonF({QPointF(9.5, 6.5), QPointF(12.5, 4.8), QPointF(12.5, 9.7), QPointF(9.5, 8)}));
 	} else if (name == "more") {
 		p.setPen(Qt::NoPen);
 		p.setBrush(SOFT);

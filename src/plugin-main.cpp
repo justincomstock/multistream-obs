@@ -29,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vertical/canvas.hpp"
 #include "vertical/docks.hpp"
 #include "vertical/record.hpp"
+#include "vertical/virtualcam.hpp"
 #include "vertical/websocket.hpp"
 
 #include <QTimer>
@@ -49,6 +50,7 @@ RelayOutput relay;
 VerticalCanvas vertical;
 RelayOutput verticalRelay("vertical-relay.json", "Multistream vertical output", "vertical");
 VerticalRecorder verticalRecord(&vertical);
+VerticalVirtualCam verticalCam(&vertical);
 Bridge *bridge = nullptr;
 QTimer *ticker = nullptr;
 
@@ -64,8 +66,11 @@ void onEvent(enum obs_frontend_event event, void *)
 		verticalRelay.shutdown();
 		if (event == OBS_FRONTEND_EVENT_EXIT)
 			verticalRecord.shutdown(); // saves its hotkeys too
+		if (event == OBS_FRONTEND_EVENT_EXIT)
+			verticalCam.shutdown();
 	}
 	verticalRecord.onFrontendEvent(int(event));
+	verticalCam.onFrontendEvent(int(event));
 	verticalRelay.onFrontendEvent(int(event));
 	vertical.onFrontendEvent(int(event));
 	switch (event) {
@@ -144,8 +149,10 @@ bool obs_module_load(void)
 			       []() { return vertical.sig(); });
 	verticalRelay.load();
 	verticalRecord.load();
+	verticalCam.load();
 	games::load();
 	vertical.recorder = &verticalRecord;
+	vertical.virtualcam = &verticalCam;
 	dock::create();
 	vertical_docks::create(&vertical, []() { return verticalRelay.state(); });
 	obs_frontend_add_event_callback(onEvent, nullptr);
@@ -169,6 +176,8 @@ void obs_module_unload(void)
 	relay.shutdown();
 	verticalRelay.shutdown();
 	verticalRecord.shutdown();
+	verticalCam.shutdown();
 	vertical.recorder = nullptr;
+	vertical.virtualcam = nullptr;
 	vertical.shutdown();
 }

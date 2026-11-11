@@ -6,6 +6,7 @@
 #include "motion.hpp"
 #include "preview.hpp"
 #include "record.hpp"
+#include "virtualcam.hpp"
 #include "theme.hpp"
 
 #include <obs-module.h>
@@ -78,6 +79,8 @@ QPointer<QToolButton> replayButton;
 QPointer<QToolButton> saveButton;
 QPointer<QLabel> recLabel;
 QPointer<QToolButton> pauseButton;
+QPointer<QToolButton> camButton; // the vertical picture on OBS Virtual Camera
+QString shownCamError;           // the camera problem last told about
 QPointer<QLabel> noticeLabel; // "Clip saved · Open folder", for a moment
 int shownNotice = 0;
 QString shownRecError; // the recording problem last told about
@@ -1466,6 +1469,7 @@ QWidget *makeMixerDock()
 // ---- Vertical Preview -----------------------------------------------------------
 
 void refreshRecord();
+void refreshCam();
 
 // "1080×1920", and the zoom when the preview isn't at "fit".
 void showSize()
@@ -1579,6 +1583,29 @@ QWidget *makePreviewDock()
 		if (!canvas->recorder->saveReplay(error))
 			warn(error);
 	});
+	// Sends the vertical picture to OBS Virtual Camera (TikTok Live Studio,
+	// Discord, Zoom...). There's one OBS camera: when OBS's own is on with the
+	// normal picture, pressing Camera simply switches it over (as Aitum does;
+	// the owner found a question here confusing, 2026-11-10).
+	camButton = toolButton(mt("Vertical.Cam"), mt("Vertical.CamTip"), "ghost");
+	camButton->setIcon(vtheme::lineIcon("camera"));
+	camButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+	camButton->setCheckable(true);
+	// Solid violet while on, so it reads from the corner of the eye (theme.cpp).
+	camButton->setObjectName(QStringLiteral("verticalCam"));
+	QObject::connect(camButton, &QToolButton::clicked, camButton, [](bool on) {
+		VerticalVirtualCam *cam = canvas->virtualcam;
+		if (!cam)
+			return;
+		QString error;
+		if (!on) {
+			cam->stop();
+		} else if (!cam->start(error, true)) {
+			shownCamError = error;
+			warn(error);
+		}
+		refreshCam();
+	});
 	QToolButton *more = iconButton("more", mt("Vertical.MoreTip"), "round");
 	QObject::connect(more, &QToolButton::clicked, more, [more]() {
 		VerticalRecorder *r = canvas->recorder;
@@ -1635,12 +1662,13 @@ QWidget *makePreviewDock()
 		menu.exec(more->mapToGlobal(QPoint(0, more->height())));
 	});
 	// Never squeezed until the words go: a narrow dock gets shorter words.
-	for (QToolButton *b : {recButton.data(), replayButton.data(), saveButton.data()})
+	for (QToolButton *b : {recButton.data(), replayButton.data(), saveButton.data(), camButton.data()})
 		b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
 	bar->addWidget(recButton);
 	bar->addWidget(pauseButton);
 	bar->addWidget(replayButton);
 	bar->addWidget(saveButton);
+	bar->addWidget(camButton);
 	bar->addStretch(1);
 	recLabel = roleLabel(QString(), "warn");
 	bar->addWidget(recLabel);
@@ -1655,12 +1683,14 @@ QWidget *makePreviewDock()
 	layout->addLayout(bar);
 	// A narrow dock: shorter button words, then icons; no size next to the scene.
 	new Fit(w, [w]() {
-		const int words = w->width() >= 350 ? 2 : w->width() >= 290 ? 1 : 0;
+		// Widths fit Rec, Replay, Save clip, Camera ✓ and ⋯ without the ⋯
+		// landing on Camera (seen at 432 px with the old 350 / 290).
+		const int words = w->width() >= 480 ? 2 : w->width() >= 370 ? 1 : 0;
 		if (sizeLabel)
 			sizeLabel->setVisible(w->width() >= 250);
 		if (words != recordWords) {
 			recordWords = words;
-			for (QToolButton *b : {recButton.data(), replayButton.data(), saveButton.data()})
+			for (QToolButton *b : {recButton.data(), replayButton.data(), saveButton.data(), camButton.data()})
 				b->setToolButtonStyle(words ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
 			replayButton->setIcon(words ? QIcon() : vtheme::lineIcon("replay"));
 			saveButton->setIcon(words ? QIcon() : vtheme::lineIcon("save"));
@@ -1728,6 +1758,39 @@ void refreshRecord()
 		shownRecError = err;
 		auto *box = new QMessageBox(QMessageBox::Warning, QStringLiteral("Multistream Vertical"),
 					    mt("Vertical.RecCouldnt").arg(err), QMessageBox::Ok, scenesDock);
+		box->setAttribute(Qt::WA_DeleteOnClose);
+		box->setModal(false);
+		box->show();
+	}
+}
+
+void refreshCam()
+{
+	VerticalVirtualCam *cam = canvas ? canvas->virtualcam : nullptr;
+	if (!camButton || !cam)
+		return;
+	const QJsonObject st = cam->state();
+	const bool on = st.value("active").toBool(), switching = st.value("switching").toBool();
+	camButton->setChecked(on || switching);
+	const QStringList all = recordWords == 2 ? QStringList{mt("Vertical.Cam"), mt("Vertical.CamOn")}
+						 : QStringList{mt("Vertical.Cam")};
+	setWords(camButton, on && recordWords == 2 ? mt("Vertical.CamOn") : mt("Vertical.Cam"), all);
+	// Greyed out, with the reason, until there's a vertical picture to send.
+	const bool ready = canvas->ready();
+	camButton->setEnabled(ready || on);
+	camButton->setToolTip(on		  ? mt("Vertical.CamOnTip")
+			      : switching ? mt("Vertical.CamSwitching")
+			      : !ready	  ? (canvas->waitsForOutputs() ? mt("Vertical.WaitsTip") : mt("Vertical.NotReady"))
+			      : st.value("mainActive").toBool() ? mt("Vertical.CamMainTip")
+								: mt("Vertical.CamTip"));
+	// It stopped by itself, or didn't come back after a collection switch.
+	const QString err = st.value("error").toString();
+	if (err.isEmpty())
+		shownCamError.clear();
+	else if (err != shownCamError) {
+		shownCamError = err;
+		auto *box = new QMessageBox(QMessageBox::Warning, QStringLiteral("Multistream Vertical"), err,
+					    QMessageBox::Ok, scenesDock);
 		box->setAttribute(Qt::WA_DeleteOnClose);
 		box->setModal(false);
 		box->show();
@@ -1807,6 +1870,7 @@ void refresh(bool force = false)
 	}
 	refreshItems(changed);
 	refreshRecord();
+	refreshCam();
 	refreshLive();
 }
 
