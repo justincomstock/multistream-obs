@@ -1804,8 +1804,22 @@ void refreshLive()
 		return;
 	const QJsonObject st = liveState();
 	const QString error = st.value("error").toString();
+	const QJsonObject df = canvas->dualFormatState();
+	const bool obsLive = obs_frontend_streaming_active();
+	const bool relayOut = st.value("sending").toBool() || st.value("reconnecting").toBool() || st.value("connecting").toBool();
+	// Twitch gets the vertical picture through Dual Format only when OBS
+	// streams straight to Twitch with Enhanced Broadcasting on.
+	const bool dualOn = df.value("on").toBool();
+	const bool dualGoes = dualOn && df.value("toTwitch").toBool() && df.value("enhanced").toBool();
+	// A private test (the Multistream dock says so): nobody but the streamer
+	// sees it, so never LIVE. Never while OBS streams straight to Twitch.
+	const bool test = canvas->privateTest() && !df.value("toTwitch").toBool() && (obsLive || relayOut);
 	QString text = mt("Vertical.NotLive"), tone = "off", tip = mt("Vertical.NotLiveTip");
-	if (st.value("reconnecting").toBool()) {
+	if (test) {
+		text = mt("Vertical.PrivateTest");
+		tone = "busy";
+		tip = mt("Vertical.PrivateTestTip");
+	} else if (st.value("reconnecting").toBool()) {
 		text = mt("Vertical.Reconnecting");
 		tone = "busy";
 		tip = mt("Vertical.ReconnectingTip");
@@ -1817,12 +1831,19 @@ void refreshLive()
 		text = mt("Vertical.Connecting");
 		tone = "busy";
 		tip = mt("Vertical.ConnectingTip");
-	} else if (canvas->dualFormatState().value("on").toBool()) {
+	} else if (dualGoes) {
 		// Twitch Dual Format sends the vertical picture with OBS's own stream.
-		const bool streaming = obs_frontend_streaming_active();
-		text = streaming ? mt("Vertical.TwitchLive") : mt("Vertical.TwitchDual");
-		tone = streaming ? "live" : "off";
-		tip = streaming ? mt("Vertical.TwitchLiveTip") : mt("Vertical.TwitchDualTip");
+		text = obsLive ? mt("Vertical.TwitchLive") : mt("Vertical.TwitchDual");
+		tone = obsLive ? "live" : "off";
+		tip = obsLive ? mt("Vertical.TwitchLiveTip") : mt("Vertical.TwitchDualTip");
+	} else if (dualOn) {
+		// Dual Format is picked, but it can't go out: say why, never LIVE.
+		text = obsLive ? mt("Vertical.TwitchNotSent") : mt("Vertical.TwitchDual");
+		tone = "bad";
+		const QString where = df.value("where").toString();
+		tip = !df.value("toTwitch").toBool()
+			      ? mt("Vertical.TwitchElsewhereTip").arg(where.isEmpty() ? mt("Vertical.SomewhereElse") : where)
+			      : mt("Vertical.EnhancedNeeded");
 	} else if (!error.isEmpty()) {
 		// The reason in the pill itself, cut short; all of it in the tooltip.
 		text = QFontMetrics(liveLabel->font()).elidedText(mt("Vertical.ProblemText").arg(error), Qt::ElideRight, 260);
@@ -1839,8 +1860,10 @@ void refreshLive()
 	}
 	liveLabel->setToolTip(tip);
 	vtheme::setProp(liveLabel, "tone", tone);
-	// Vertical Scenes says ON AIR only while the vertical stream is out.
-	const bool out = st.value("sending").toBool() || st.value("reconnecting").toBool();
+	// Vertical Scenes says ON AIR only while the vertical picture really goes
+	// out to viewers: to Multistream, or to Twitch by Dual Format. Not in a
+	// private test.
+	const bool out = !test && (st.value("sending").toBool() || st.value("reconnecting").toBool() || (dualGoes && obsLive));
 	if (out != vtheme::SceneDelegate::live) {
 		vtheme::SceneDelegate::live = out;
 		if (list)

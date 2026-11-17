@@ -137,9 +137,16 @@ public:
 	// One vertical scene per main scene, framed like the Vertical tool
 	// ("fill" with a 0..100 crop position, or "fit"). Returns how many, or -1.
 	int importLuaTool(const QString &framing, int position, QString &error);
-	// {enhanced, on}: this canvas as Twitch Enhanced Broadcasting's extra canvas.
+	// {enhanced, on, toTwitch, where}: this canvas as Twitch Enhanced
+	// Broadcasting's extra canvas. It only goes out when all three are true;
+	// `where` names where OBS streams otherwise.
 	QJsonObject dualFormatState() const;
 	bool setDualFormat(bool on, QString &error);
+	// The Multistream dock says a private test is running (sending to
+	// platforms off): the preview pill says so instead of LIVE. Forgotten
+	// 30 s after the dock last said it (the dock closed).
+	void setPrivateTest(bool on);
+	bool privateTest() const;
 
 	QJsonObject audioState() const;
 	bool setAudio(const QString &source, const QJsonObject &in, QString &error);
@@ -198,6 +205,7 @@ private:
 	int width_ = 1080;
 	int height_ = 1920;
 	bool followMain_ = true;
+	qint64 privateTestAt_ = 0; // ms since epoch the dock last said "private test"; 0: not one
 	quint64 version_ = 1;
 	bool videoWaits_ = false;
 	// placeNew's items still waiting for a size: {scene UUID, item id}.

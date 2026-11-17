@@ -528,6 +528,10 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 			replyJson(s, 200, verticalRelay_->state());
 		else
 			replyJson(s, 409, errorJson(verticalRelay_->state().value("error").toString()));
+	} else if (p == "vertical/test") {
+		// The dock: a private test is running (the Preview Vertical pill says so).
+		vertical_->setPrivateTest(in.value("test").toBool());
+		replyJson(s, 200, okJson());
 	} else if (p == "vertical/stop") {
 		verticalRelay_->stopNow();
 		replyJson(s, 200, verticalRelay_->state());

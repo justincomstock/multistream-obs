@@ -18,7 +18,7 @@ void load();
 void tick();
 
 // For /bridge/games: { windows: [{ exe, name, gameLike, foreground,
-// minimized, started }], sources: [{ name, kind }], follow: [names],
+// minimized, started, icon? (the program's icon, a PNG data URL) }], sources: [{ name, kind }], follow: [names],
 // following, legacy: { found, loaded, games } }.
 QJsonObject state();
 

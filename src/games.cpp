@@ -4,9 +4,14 @@
 #include <util/platform.h>
 #include <plugin-support.h>
 
+#include <QBuffer>
 #include <QDir>
 #include <QFile>
+#include <QFileIconProvider>
 #include <QFileInfo>
+#include <QHash>
+#include <QIcon>
+#include <QPixmap>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMap>
@@ -470,6 +475,36 @@ QJsonObject legacy()
 	return out;
 }
 
+// The program's own icon (the one its desktop shortcut shows), 32 px, as a
+// PNG data URL for the Games page; "" when it has none. Kept per program:
+// it's asked for every 2 seconds.
+QString iconOf(const Win &w)
+{
+	static QHash<QString, QString> cache;
+	if (w.path.isEmpty())
+		return QString();
+	auto hit = cache.constFind(w.path);
+	if (hit != cache.constEnd())
+		return hit.value();
+	QString target = w.path;
+	// macOS: the .app bundle's icon, not the bare program file's.
+	const int app = target.indexOf(".app/");
+	if (app > 0)
+		target = target.left(app + 4);
+	QString out;
+	const QPixmap px = QFileIconProvider().icon(QFileInfo(target)).pixmap(32, 32);
+	if (!px.isNull()) {
+		QByteArray png;
+		QBuffer buf(&png);
+		if (buf.open(QIODevice::WriteOnly) && px.save(&buf, "PNG") && png.size() < 12000)
+			out = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
+	}
+	if (cache.size() > 300)
+		cache.clear();
+	cache.insert(w.path, out);
+	return out;
+}
+
 } // namespace
 
 void games::load()
@@ -500,6 +535,9 @@ QJsonObject games::state()
 		o["foreground"] = w.foreground;
 		o["minimized"] = w.minimized;
 		o["started"] = double(w.started);
+		const QString icon = iconOf(w);
+		if (!icon.isEmpty())
+			o["icon"] = icon;
 		ws.append(o);
 	}
 	QJsonArray sources;

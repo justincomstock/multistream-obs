@@ -17,6 +17,8 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
+#include <QRegularExpression>
+#include <QUrl>
 
 #include <algorithm>
 #include <cstring>
@@ -230,7 +232,37 @@ QJsonObject VerticalCanvas::dualFormatState() const
 	const char *extra = cfg ? config_get_string(cfg, "Stream1", "MultitrackExtraCanvas") : nullptr;
 	o["enhanced"] = cfg && config_get_bool(cfg, "Stream1", "EnableMultitrackVideo");
 	o["on"] = canvas_ && extra && strcmp(extra, obs_canvas_get_uuid(canvas_)) == 0;
+	// Enhanced Broadcasting (and so the extra canvas) only works with OBS's
+	// stream going straight to Twitch. Streaming to Multistream, nothing
+	// vertical reaches Twitch this way, whatever the profile says.
+	bool toTwitch = false;
+	QString where;
+	if (obs_service_t *svc = obs_frontend_get_streaming_service()) {
+		obs_data_t *s = obs_service_get_settings(svc);
+		const QString name = QString::fromUtf8(obs_data_get_string(s, "service"));
+		const char *url = obs_service_get_connect_info(svc, OBS_SERVICE_CONNECT_INFO_SERVER_URL);
+		const QString server = QString::fromUtf8(url ? url : obs_data_get_string(s, "server"));
+		obs_data_release(s);
+		toTwitch = name.contains("twitch", Qt::CaseInsensitive) || server.contains("twitch.tv", Qt::CaseInsensitive);
+		const QString host = QUrl(QString(server).replace(QRegularExpression("^rtmps?:", QRegularExpression::CaseInsensitiveOption), "http:")).host();
+		where = !name.isEmpty() ? name
+			: host.contains("multistream", Qt::CaseInsensitive) ? QStringLiteral("Multistream")
+			: (host.startsWith("127.") || host == "localhost" || host == "::1") ? mt("Vertical.TheApp")
+			: host;
+	}
+	o["toTwitch"] = toTwitch;
+	o["where"] = where;
 	return o;
+}
+
+void VerticalCanvas::setPrivateTest(bool on)
+{
+	privateTestAt_ = on ? QDateTime::currentMSecsSinceEpoch() : 0;
+}
+
+bool VerticalCanvas::privateTest() const
+{
+	return privateTestAt_ && QDateTime::currentMSecsSinceEpoch() - privateTestAt_ < 30000;
 }
 
 bool VerticalCanvas::setDualFormat(bool on, QString &error)
