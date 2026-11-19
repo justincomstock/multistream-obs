@@ -48,6 +48,8 @@ private:
 	bool startOutput();
 	void stopOutput();
 	void queueCallback(std::function<void()> fn);
+	// Notes a stop that couldn't connect, with why (net-check.hpp): tried once per address.
+	void noteCantConnect(const char *kind, const QString &line);
 	QString sig() const;
 	void save() const;
 	// An encoder that stopped with -6/-8 is skipped from now on (per family, so
@@ -92,6 +94,13 @@ private:
 	bool dropped_ = false;   // was sending, lost the link: tick() is bringing it back
 	qint64 droppedAt_ = 0;
 	QString error_;
+	long long errorCode_ = 0; // the stop code error_ came from (json "code")
+	// Why server_ can't be connected to (json "why"), found by netcheck.
+	QString why_;
+	QString whyFor_;
+	bool checking_ = false;
+	// Gone when this object is: a check finishing later does nothing.
+	std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 	QString note_;   // shown while sending: the encoder was switched
 	QString encoder_;
 	// Encoder families that failed this OBS session, and the picture/bitrate

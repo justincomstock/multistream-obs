@@ -2,6 +2,7 @@
 
 #include "events.hpp"
 #include "i18n.hpp"
+#include "net-check.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -393,9 +394,38 @@ QJsonObject RelayOutput::state() const
 	o["connecting"] = wanted_ && (attempting_ || stopping_);
 	o["encoder"] = encoder_;
 	o["error"] = error_;
+	// Which stop the error is (the dock words what to do): only while the
+	// error shown is still that stop's.
+	o["code"] = double(errorCode_ && error_.startsWith(stopReason(errorCode_)) ? errorCode_ : 0);
+	o["why"] = errorCode_ == -2 && whyFor_ == server_ && error_.startsWith(stopReason(errorCode_)) ? why_ : QString();
 	o["note"] = note_;
 	o["startedAt"] = double(sending_ ? startedAt_ : 0);
 	return o;
+}
+
+void RelayOutput::noteCantConnect(const char *kind, const QString &line)
+{
+	if (whyFor_ == server_ && !why_.isEmpty()) {
+		msevents::note(kind, line + " - why: " + why_);
+		return;
+	}
+	if (checking_) {
+		msevents::note(kind, line);
+		return;
+	}
+	checking_ = true;
+	const std::weak_ptr<int> alive = alive_;
+	const QString server = server_;
+	const std::string k = kind;
+	netcheck::diagnose(server, [this, alive, server, k, line](const QString &why) {
+		if (alive.expired())
+			return;
+		checking_ = false;
+		why_ = why;
+		whyFor_ = server;
+		obs_log(LOG_WARNING, "%s: can't connect: %s", name_.toUtf8().constData(), why.toUtf8().constData());
+		msevents::note(k.c_str(), line + " - why: " + why);
+	});
 }
 
 void RelayOutput::queueCallback(std::function<void()> fn)
@@ -423,6 +453,8 @@ void RelayOutput::onStart(void *data, calldata_t *)
 		}
 		obs_log(LOG_INFO, "%s: sending", self->name_.toUtf8().constData());
 		self->sending_ = true;
+		self->why_.clear();
+		self->whyFor_.clear();
 		self->reconnecting_ = false;
 		self->dropped_ = false;
 		self->error_.clear();
@@ -457,14 +489,20 @@ void RelayOutput::onStop(void *data, calldata_t *cd)
 		}
 		if (code != 0) {
 			self->error_ = stopReason(code);
+			self->errorCode_ = code;
 			if (!detail.isEmpty())
 				self->error_ += " " + detail;
 			// Every stop with an error goes in the OBS log and to the Server
 			// health page (msevents), not only the first minutes of a drop.
-			msevents::note(code == -6 || code == -8 ? "output-encoder-failed"
-						  : wasSending          ? "output-dropped"
-									: "output-didnt-start",
-				       QString("%1: code %2: %3").arg(self->name_).arg(code).arg(self->error_));
+			const char *kind = code == -6 || code == -8 ? "output-encoder-failed"
+					   : wasSending          ? "output-dropped"
+								 : "output-didnt-start";
+			const QString line = QString("%1: code %2: %3").arg(self->name_).arg(code).arg(self->error_);
+			// "Couldn't connect" says nothing about why: find out first.
+			if (code == -2)
+				self->noteCantConnect(kind, line);
+			else
+				msevents::note(kind, line);
 			if (code == -6 || code == -8) {
 				// The encoder itself is the problem (a graphics card out of
 				// encoder sessions, say): the next try builds with the next

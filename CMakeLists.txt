@@ -51,6 +51,7 @@ target_sources(
     src/events.cpp
     src/games.cpp
     src/http.cpp
+    src/net-check.cpp
     src/obs-state.cpp
     src/relay-output.cpp
     src/vertical/arrange.cpp
