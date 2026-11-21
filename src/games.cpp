@@ -91,7 +91,10 @@ const QSet<QString> NOT_GAMES = {
 };
 // Parts of a program's name that mean a launcher, an installer or a helper.
 const char *HELPERS[] = {"launcher", "crashhandler", "crashreport", "setup", "installer", "updater",
-			 "unins", "redist", "easyanticheat", "battleye", "helper", "bootstrap"};
+			 "unins", "redist", "easyanticheat", "battleye", "helper", "bootstrap",
+			 // Steam tools that aren't games (the dock's games.mjs NOT_GAMES has the full list).
+			 "facetracking", "vrserver", "vrmonitor", "vrcompositor", "vrdashboard", "wallpaper32",
+			 "wallpaper64", "xsoverlay", "fpsvr", "vtube studio", "vseeface", "warudo", "vnyan"};
 
 QString str(const char *s)
 {

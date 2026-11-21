@@ -1586,7 +1586,7 @@ QWidget *makePreviewDock()
 	// Sends the vertical picture to OBS Virtual Camera (TikTok Live Studio,
 	// Discord, Zoom...). There's one OBS camera: when OBS's own is on with the
 	// normal picture, pressing Camera simply switches it over (as Aitum does;
-	// the owner found a question here confusing, 2026-11-10).
+	// a question here is confusing).
 	camButton = toolButton(mt("Vertical.Cam"), mt("Vertical.CamTip"), "ghost");
 	camButton->setIcon(vtheme::lineIcon("camera"));
 	camButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -1684,7 +1684,7 @@ QWidget *makePreviewDock()
 	// A narrow dock: shorter button words, then icons; no size next to the scene.
 	new Fit(w, [w]() {
 		// Widths fit Rec, Replay, Save clip, Camera ✓ and ⋯ without the ⋯
-		// landing on Camera (seen at 432 px with the old 350 / 290).
+		// landing on Camera.
 		const int words = w->width() >= 480 ? 2 : w->width() >= 370 ? 1 : 0;
 		if (sizeLabel)
 			sizeLabel->setVisible(w->width() >= 250);
