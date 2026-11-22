@@ -121,6 +121,7 @@ int VerticalCanvas::importAitum(QString &error)
 	std::vector<obs_source_t *> scenes;
 	obs_canvas_enum_scenes(c, collect, &scenes);
 	QStringList taken = sceneNames();
+	QMap<QString, QString> renamed; // Aitum's name -> our copy's
 	int count = 0;
 	for (obs_source_t *src : scenes) {
 		const QString base = QString::fromUtf8(obs_source_get_name(src));
@@ -136,6 +137,8 @@ int VerticalCanvas::importAitum(QString &error)
 			obs_source_set_name(obs_scene_get_source(copy), n.toUtf8().constData());
 			order_ << QString::fromUtf8(obs_source_get_uuid(obs_scene_get_source(copy)));
 			taken << n;
+			if (n != base)
+				renamed[base] = n;
 			obs_scene_release(copy);
 			count++;
 		}
@@ -147,16 +150,77 @@ int VerticalCanvas::importAitum(QString &error)
 		return -1;
 	}
 	removeIfEmpty(FIRST_SCENE_NAME);
+	// Aitum's "this main scene shows that vertical scene" come along too.
+	aitumLinksDone_ = false;
+	const int linked = adoptAitumLinks(renamed);
 	if (obs_scene_t *cur = findScene(scene_))
 		obs_scene_release(cur);
 	else {
 		QString ignored;
 		setScene(sceneNames().value(0), ignored);
 	}
-	obs_log(LOG_INFO, "vertical: imported %d scenes from Aitum Vertical", count);
+	obs_log(LOG_INFO, "vertical: imported %d scenes from Aitum Vertical, %d links", count, linked);
 	save();
 	changed();
+	if (followMain_)
+		followMainScene();
 	return count;
+}
+
+int VerticalCanvas::adoptAitumLinks(const QMap<QString, QString> &renamed)
+{
+	if (!canvas_ || aitumLinksDone_)
+		return 0;
+	// Aitum's canvas size picks its entry; with Aitum gone, any upright one.
+	int aw = 0, ah = 0;
+	if (obs_canvas_t *c = aitumCanvas()) {
+		struct obs_video_info ovi = {};
+		if (obs_canvas_get_video_info(c, &ovi)) {
+			aw = int(ovi.base_width);
+			ah = int(ovi.base_height);
+		}
+		obs_canvas_release(c);
+	}
+	struct obs_frontend_source_list mains = {};
+	obs_frontend_get_scenes(&mains);
+	int added = 0, seen = 0;
+	for (size_t i = 0; i < mains.sources.num; i++) {
+		obs_source_t *main = mains.sources.array[i];
+		obs_data_t *settings = obs_source_get_settings(main);
+		obs_data_array_t *arr = obs_data_get_array(settings, "canvas");
+		QString target;
+		for (size_t j = 0, n = obs_data_array_count(arr); j < n && target.isEmpty(); j++) {
+			obs_data_t *o = obs_data_array_item(arr, j);
+			const int w = int(obs_data_get_int(o, "width")), h = int(obs_data_get_int(o, "height"));
+			const QString name = QString::fromUtf8(obs_data_get_string(o, "scene"));
+			if (!name.isEmpty() && (aw ? (w == aw && h == ah) : h > w))
+				target = renamed.value(name, name);
+			obs_data_release(o);
+		}
+		obs_data_array_release(arr);
+		obs_data_release(settings);
+		if (target.isEmpty())
+			continue;
+		seen++;
+		const QString mainUuid = QString::fromUtf8(obs_source_get_uuid(main));
+		if (links_.contains(mainUuid))
+			continue;
+		if (obs_scene_t *v = findScene(target)) {
+			links_[mainUuid] = QString::fromUtf8(obs_source_get_uuid(obs_scene_get_source(v)));
+			obs_scene_release(v);
+			added++;
+		}
+	}
+	obs_frontend_source_list_free(&mains);
+	// Done once something was taken over (before the import, Aitum's scenes
+	// aren't here yet: nothing to link, so it waits for the import).
+	if (added || (seen && !links_.isEmpty()))
+		aitumLinksDone_ = true;
+	if (added) {
+		obs_log(LOG_INFO, "vertical: took over %d scene links from Aitum Vertical", added);
+		changed();
+	}
+	return added;
 }
 
 int VerticalCanvas::importLuaTool(const QString &framing, int position, QString &error)

@@ -473,8 +473,10 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		replyJson(s, 200, okJson());
 		// After the answer: OBS may ask "Are you sure?" in a dialog.
 		QTimer::singleShot(0, []() {
-			if (!obs_frontend_streaming_active())
+			if (!obs_frontend_streaming_active()) {
+				obsstate::shortenKeyframes();
 				obs_frontend_streaming_start();
+			}
 		});
 	} else if (p == "stop") {
 		obs_log(LOG_INFO, "[dock] End pressed%s", obs_frontend_streaming_active() ? "" : " (wasn't live)");
@@ -512,6 +514,13 @@ void Bridge::bridgeRoute(QTcpSocket *s, const HttpRequest &r)
 		if (obsstate::setEncoder(in.value("bitrate").toInt(), in.value("keyintSec").toInt(), error)) {
 			obs_log(LOG_INFO, "[dock] OBS's encoder set to %d kbps, keyframe every %d s", in.value("bitrate").toInt(),
 				in.value("keyintSec").toInt());
+			replyJson(s, 200, okJson());
+		} else
+			replyJson(s, 409, errorJson(error));
+	} else if (p == "audio") {
+		const QString name = in.value("name").toString();
+		if (obsstate::setAudio(name, in.value("unmute").toBool(), in.value("volume").toDouble(-1), error)) {
+			obs_log(LOG_INFO, "[dock] sound source \"%s\" unmuted or turned up", name.toUtf8().constData());
 			replyJson(s, 200, okJson());
 		} else
 			replyJson(s, 409, errorJson(error));

@@ -210,6 +210,7 @@ void VerticalCanvas::save() const
 		}
 		obs_data_set_array(mine, "links", links);
 		obs_data_array_release(links);
+		obs_data_set_bool(mine, "aitumLinksDone", aitumLinksDone_);
 		obs_data_t *audio = audio_.saveSettings();
 		obs_data_set_obj(mine, "audio", audio);
 		obs_data_release(audio);
@@ -292,7 +293,9 @@ void VerticalCanvas::attach()
 	}
 	order_.clear();
 	links_.clear();
+	aitumLinksDone_ = false;
 	if (mine) {
+		aitumLinksDone_ = obs_data_get_bool(mine, "aitumLinksDone");
 		wanted = QString::fromUtf8(obs_data_get_string(mine, "scene"));
 		obs_data_array_t *order = obs_data_get_array(mine, "order");
 		for (size_t i = 0, n = obs_data_array_count(order); i < n; i++) {
@@ -325,6 +328,9 @@ void VerticalCanvas::attach()
 		showScene(obs_scene_get_source(scene));
 		obs_scene_release(scene);
 	}
+	// Imported from Aitum before its links came along: take them now, once.
+	if (!aitumLinksDone_ && adoptAitumLinks() > 0)
+		save();
 	if (followMain_)
 		followMainScene();
 

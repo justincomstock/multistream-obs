@@ -134,6 +134,12 @@ public:
 	QJsonObject importState() const;
 	// Copies Aitum Vertical's scenes onto this canvas. Returns how many, or -1.
 	int importAitum(QString &error);
+	// Aitum Vertical keeps "this main scene shows that vertical scene" in each
+	// main scene's own settings: "canvas": [{width, height, scene: name}].
+	// Links each main scene with none yet to our scene of that name
+	// (`renamed`: Aitum's name -> our copy's, when the copy had to differ).
+	// Returns how many links were added.
+	int adoptAitumLinks(const QMap<QString, QString> &renamed = {});
 	// One vertical scene per main scene, framed like the Vertical tool
 	// ("fill" with a 0..100 crop position, or "fit"). Returns how many, or -1.
 	int importLuaTool(const QString &framing, int position, QString &error);
@@ -205,6 +211,9 @@ private:
 	int width_ = 1080;
 	int height_ = 1920;
 	bool followMain_ = true;
+	// Aitum's links were taken over for this collection (once: a link the
+	// streamer removes afterwards stays removed).
+	bool aitumLinksDone_ = false;
 	qint64 privateTestAt_ = 0; // ms since epoch the dock last said "private test"; 0: not one
 	quint64 version_ = 1;
 	bool videoWaits_ = false;

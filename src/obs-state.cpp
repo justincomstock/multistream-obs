@@ -16,6 +16,10 @@
 #include <QUrl>
 
 #include <atomic>
+#include <cstring>
+#include <functional>
+#include <QJsonArray>
+#include <QSet>
 
 namespace {
 
@@ -327,6 +331,135 @@ void countShown(obs_scene_t *scene, int &n, int depth)
 }
 } // namespace
 
+namespace {
+// Every visible item of a scene, through groups and nested scenes.
+void eachVisible(obs_scene_t *scene, const std::function<void(obs_source_t *)> &fn, int depth)
+{
+	if (!scene || depth > 8)
+		return;
+	struct Ctx {
+		const std::function<void(obs_source_t *)> *fn;
+		int depth;
+	} ctx{&fn, depth};
+	obs_scene_enum_items(
+		scene,
+		[](obs_scene_t *, obs_sceneitem_t *item, void *p) {
+			auto *c = static_cast<Ctx *>(p);
+			if (!obs_sceneitem_visible(item))
+				return true;
+			if (obs_sceneitem_is_group(item)) {
+				eachVisible(obs_sceneitem_group_get_scene(item), *c->fn, c->depth + 1);
+				return true;
+			}
+			obs_source_t *src = obs_sceneitem_get_source(item);
+			if (obs_scene_t *nested = obs_scene_from_source(src)) {
+				eachVisible(nested, *c->fn, c->depth + 1);
+				return true;
+			}
+			(*c->fn)(src);
+			return true;
+		},
+		&ctx);
+}
+
+// A browser source showing a page from the Multistream app on this PC
+// (127.0.0.1:14563): it goes blank while the app is closed.
+bool showsAppPage(obs_source_t *src)
+{
+	const char *id = obs_source_get_unversioned_id(src);
+	if (!id || strcmp(id, "browser_source") != 0)
+		return false;
+	obs_data_t *s = obs_source_get_settings(src);
+	const bool local = obs_data_get_bool(s, "is_local_file");
+	const QUrl url(str(obs_data_get_string(s, "url")));
+	obs_data_release(s);
+	const QString host = url.host().toLower();
+	return !local && url.port() == 14563 && (host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1");
+}
+
+// "mic", "desktop", or "" for a source that isn't one of OBS's sound captures.
+QString soundKind(obs_source_t *src)
+{
+	const QString id = str(obs_source_get_unversioned_id(src));
+	if (id.endsWith("_input_capture"))
+		return "mic";
+	if (id.endsWith("_output_capture") || id == "wasapi_process_output_capture")
+		return "desktop";
+	return QString();
+}
+
+// The sound OBS sends: Settings > Audio's devices plus the captures in the
+// scene on the stream.
+QJsonArray soundSources()
+{
+	QJsonArray out;
+	QSet<QString> seen;
+	auto add = [&](obs_source_t *src) {
+		const QString kind = soundKind(src);
+		const QString name = str(obs_source_get_name(src));
+		if (kind.isEmpty() || seen.contains(name))
+			return;
+		seen.insert(name);
+		QJsonObject a;
+		a["name"] = name;
+		a["kind"] = kind;
+		a["muted"] = obs_source_muted(src);
+		a["volume"] = double(obs_source_get_volume(src));
+		a["enabled"] = obs_source_enabled(src);
+		a["pushToTalk"] = obs_source_push_to_talk_enabled(src);
+		out.append(a);
+	};
+	for (uint32_t ch = 1; ch <= 6; ch++) {
+		if (obs_source_t *src = obs_get_output_source(ch)) {
+			add(src);
+			obs_source_release(src);
+		}
+	}
+	if (obs_source_t *cur = obs_frontend_get_current_scene()) {
+		eachVisible(obs_scene_from_source(cur), add, 0);
+		obs_source_release(cur);
+	}
+	return out;
+}
+
+// The names of the app's overlays in any scene (shown items only).
+QJsonArray appOverlays()
+{
+	QJsonArray out;
+	QSet<QString> seen;
+	obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		eachVisible(obs_scene_from_source(scenes.sources.array[i]), [&](obs_source_t *src) {
+			const QString name = str(obs_source_get_name(src));
+			if (!seen.contains(name) && showsAppPage(src)) {
+				seen.insert(name);
+				out.append(name);
+			}
+		}, 0);
+	}
+	obs_frontend_source_list_free(&scenes);
+	return out;
+}
+} // namespace
+
+bool obsstate::setAudio(const QString &name, bool unmute, double volume, QString &error)
+{
+	obs_source_t *src = obs_get_source_by_name(name.toUtf8().constData());
+	if (!src || soundKind(src).isEmpty()) {
+		if (src)
+			obs_source_release(src);
+		error = mt("Bridge.NoSuchSound");
+		return false;
+	}
+	if (unmute)
+		obs_source_set_muted(src, false);
+	if (volume >= 0)
+		obs_source_set_volume(src, float(qMin(volume, 1.0)));
+	obs_source_release(src);
+	return true;
+}
+
 int obsstate::shownSources(obs_scene_t *scene)
 {
 	int n = 0;
@@ -411,6 +544,10 @@ QJsonObject obsstate::snapshot()
 		o["scene"] = sc;
 		obs_source_release(cur);
 	}
+	// What viewers hear (the dock warns about a muted mic or no sound), and
+	// the overlays that come from the Multistream app (blank while it's closed).
+	o["audio"] = soundSources();
+	o["appOverlays"] = appOverlays();
 
 	obs_video_info ovi = {};
 	if (obs_get_video_info(&ovi)) {
@@ -562,6 +699,46 @@ bool obsstate::setEncoder(int bitrate, int keyintSec, QString &error)
 	if (!ok)
 		error = mt("Obs.EncoderNotSaved");
 	return ok;
+}
+
+// OBS on "automatic" sends a full picture about every 8 s, and the Studio's
+// preview can only start on one, so it took about 30 s to show (the owner,
+// 2026-11-21). 2 s is what Twitch and YouTube ask for. Both modes re-apply
+// their own settings when the stream starts, merged over these, and neither
+// sets keyint_sec unless the streamer did (Advanced: streamEncoder.json).
+void obsstate::shortenKeyframes()
+{
+	if (obs_frontend_streaming_active())
+		return;
+	config_t *cfg = obs_frontend_get_profile_config();
+	if (cfg && advancedMode(cfg)) {
+		const QByteArray path = profileFile("streamEncoder.json").toUtf8();
+		if (obs_data_t *js = obs_data_create_from_json_file_safe(path.constData(), "bak")) {
+			const long long k = obs_data_get_int(js, "keyint_sec");
+			if (k > 2) {
+				obs_data_set_int(js, "keyint_sec", 2);
+				obs_data_save_json_safe(js, path.constData(), "tmp", "bak");
+				obs_log(LOG_INFO, "[encoder] keyframe interval %llds -> 2s (Advanced output setting)", k);
+			}
+			obs_data_release(js);
+		}
+	}
+	for (const char *name : {"simple_video_stream", "advanced_video_stream"}) {
+		obs_encoder_t *enc = obs_get_encoder_by_name(name);
+		if (!enc)
+			continue;
+		obs_data_t *s = obs_encoder_get_settings(enc);
+		const long long k = s ? obs_data_get_int(s, "keyint_sec") : 0;
+		if (s && (k <= 0 || k > 2)) {
+			obs_data_t *u = obs_data_create();
+			obs_data_set_int(u, "keyint_sec", 2);
+			obs_encoder_update(enc, u);
+			obs_data_release(u);
+			obs_log(LOG_INFO, "[encoder] keyframe interval %s -> 2s", k <= 0 ? "automatic" : QString("%1s").arg(k).toUtf8().constData());
+		}
+		obs_data_release(s);
+		obs_encoder_release(enc);
+	}
 }
 
 bool obsstate::restoreService(QString &error)

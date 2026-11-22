@@ -38,5 +38,11 @@ bool restoreService(QString &error);
 // The stream encoder's bitrate (kbps) and keyframe interval (seconds); 0
 // leaves one as it is. Simple output mode always sends a keyframe every 2 s.
 bool setEncoder(int bitrate, int keyintSec, QString &error);
+// A mic or desktop-audio source by name: unmute it, and/or set its volume
+// (0..1, below 0 leaves it). Only sound sources the snapshot lists.
+bool setAudio(const QString &name, bool unmute, double volume, QString &error);
+// A full picture every 2 s when OBS is on automatic (about 8 s) or longer:
+// the preview starts in seconds, as Twitch and YouTube ask. Before a start.
+void shortenKeyframes();
 
 } // namespace obsstate
