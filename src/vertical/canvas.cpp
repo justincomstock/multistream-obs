@@ -8,9 +8,11 @@
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 #include <graphics/vec2.h>
+#include <graphics/vec4.h>
 #include <util/platform.h>
 
 #include <QCoreApplication>
+#include <QImage>
 #include <QJsonArray>
 #include <QMap>
 #include <QMetaObject>
@@ -18,6 +20,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstring>
 #include <set>
 #include <vector>
@@ -1048,4 +1051,44 @@ QJsonObject VerticalCanvas::state() const
 		o["virtualcam"] = virtualcam->state();
 	o["dualFormat"] = dualFormatState();
 	return o;
+}
+
+QImage renderStill(obs_canvas_t *c, uint32_t w)
+{
+	struct obs_video_info ovi = {};
+	const bool info = c ? obs_canvas_get_video_info(c, &ovi) : obs_get_video_info(&ovi);
+	if (!info || !ovi.base_width || !ovi.base_height || !w)
+		return QImage();
+	const uint32_t h = std::max<uint32_t>(2, uint32_t(std::lround(double(w) * ovi.base_height / ovi.base_width)) & ~1u);
+	std::vector<uint8_t> pixels;
+	uint32_t linesize = 0;
+	obs_enter_graphics();
+	gs_texrender_t *tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	gs_stagesurf_t *stage = gs_stagesurface_create(w, h, GS_RGBA);
+	if (tr && stage && gs_texrender_begin(tr, w, h)) {
+		struct vec4 clear;
+		vec4_zero(&clear);
+		gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+		gs_ortho(0.0f, float(ovi.base_width), 0.0f, float(ovi.base_height), -100.0f, 100.0f);
+		if (c)
+			obs_render_canvas_texture(c);
+		else
+			obs_render_main_texture();
+		gs_texrender_end(tr);
+		gs_stage_texture(stage, gs_texrender_get_texture(tr));
+		uint8_t *data = nullptr;
+		if (gs_stagesurface_map(stage, &data, &linesize)) {
+			pixels.assign(data, data + size_t(linesize) * h);
+			gs_stagesurface_unmap(stage);
+		}
+	}
+	if (stage)
+		gs_stagesurface_destroy(stage);
+	if (tr)
+		gs_texrender_destroy(tr);
+	obs_leave_graphics();
+	if (pixels.empty())
+		return QImage();
+	// The pixels go when this returns: copy them out.
+	return QImage(pixels.data(), int(w), int(h), int(linesize), QImage::Format_RGBA8888).convertToFormat(QImage::Format_RGB888);
 }

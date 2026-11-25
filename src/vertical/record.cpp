@@ -18,6 +18,7 @@
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QMetaObject>
+#include <QTimer>
 
 namespace {
 
@@ -172,9 +173,9 @@ void VerticalRecorder::registerHotkeys()
 			auto *self = static_cast<VerticalRecorder *>(data);
 			onUi([self]() {
 				// A hotkey press shows nothing by itself: say when it didn't work.
+				// (A refusal shows on the clip card, with the fix.)
 				QString error;
-				if (!self->saveReplay(error))
-					self->notify(mt("Vertical.NoticeNoClip").arg(error));
+				self->saveReplay(error);
 			});
 		},
 		this);
@@ -340,7 +341,11 @@ void VerticalRecorder::onReplaySaved(void *data, calldata_t *)
 		if (proc_handler_call(ph, "get_last_replay", &cd)) {
 			const char *p = calldata_string(&cd, "path");
 			self->lastReplay_ = p ? QString::fromUtf8(p) : QString();
-			self->notify(mt("Vertical.NoticeClipSaved"), self->lastReplay_);
+			self->clipCount_++;
+			self->clip_["phase"] = "saved";
+			self->clip_["file"] = self->lastReplay_;
+			self->clip_["count"] = self->clipCount_;
+			self->clip_["seq"] = self->clip_.value("seq").toInt() + 1;
 			obs_log(LOG_INFO, "vertical: replay saved to %s", p ? p : "?");
 		}
 		calldata_free(&cd);
@@ -464,6 +469,8 @@ bool VerticalRecorder::startReplay(QString &error)
 		return false;
 	}
 	error_.clear();
+	replayStartedAt_ = QDateTime::currentMSecsSinceEpoch();
+	clipCount_ = 0;
 	return true;
 }
 
@@ -477,12 +484,44 @@ bool VerticalRecorder::saveReplay(QString &error)
 {
 	if (!replayActive()) {
 		error = mt("Vertical.ReplayNotRunning");
+		clipFailed("off");
 		return false;
 	}
 	calldata_t cd = {};
 	proc_handler_call(obs_output_get_proc_handler(replay_), "save", &cd);
 	calldata_free(&cd);
+	// The card shows it at once, with the picture as it is now: the clip's last frame.
+	obs_canvas_t *c = canvas_->canvasRef();
+	clipStill_ = c ? renderStill(c, 108) : QImage();
+	obs_canvas_release(c);
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	const int held = replayStartedAt_ ? int((now - replayStartedAt_) / 1000) : replaySeconds_;
+	const int seq = clip_.value("seq").toInt() + 1;
+	clip_ = QJsonObject{{"seq", seq},
+			    {"phase", "saving"},
+			    {"seconds", std::clamp(held, 1, replaySeconds_)},
+			    {"at", double(now)},
+			    {"count", clipCount_}};
+	// OBS says nothing when it can't write the file (a full drive, a folder it
+	// can't write to): still saving after half a minute means it didn't.
+	std::weak_ptr<bool> alive = alive_;
+	QTimer::singleShot(30000, qApp, [this, alive, seq]() {
+		if (alive.lock() && clip_.value("seq").toInt() == seq && clip_.value("phase").toString() == "saving")
+			clipFailed("write");
+	});
 	return true;
+}
+
+void VerticalRecorder::clipFailed(const QString &reason)
+{
+	clip_ = QJsonObject{{"seq", clip_.value("seq").toInt() + 1},
+			    {"phase", "failed"},
+			    {"reason", reason},
+			    {"seconds", replaySeconds_},
+			    {"at", double(QDateTime::currentMSecsSinceEpoch())},
+			    {"count", clipCount_}};
+	clipStill_ = QImage();
+	obs_log(LOG_WARNING, "vertical: clip not saved (%s)", reason.toUtf8().constData());
 }
 
 void VerticalRecorder::onFrontendEvent(int event)
@@ -542,6 +581,8 @@ void VerticalRecorder::onFrontendEvent(int event)
 
 void VerticalRecorder::shutdown()
 {
+	*alive_ = false;
+	alive_ = std::make_shared<bool>(true);
 	if (hkRecord_ != OBS_INVALID_HOTKEY_ID)
 		save();
 	releaseOutput(record_);
@@ -571,6 +612,7 @@ QJsonObject VerticalRecorder::state() const
 	o["notice"] = notice_;
 	o["noticeFile"] = noticeFile_;
 	o["noticeSeq"] = noticeSeq_;
+	o["clip"] = clip_;
 	return o;
 }
 

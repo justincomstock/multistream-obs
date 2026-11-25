@@ -633,10 +633,16 @@ bool obsstate::setService(const QString &server, const QString &key, QString &er
 	}
 	const QByteArray srv = server.toUtf8(), k = key.toUtf8();
 
-	// Keep the service it replaces (once: not when it's already ours).
+	// Keep the service it replaces (once: not when it's already ours). Any
+	// Multistream server counts as ours: moving OBS to another Multistream
+	// server location must not make the old one the setting to "put back",
+	// or the undo moves OBS back and the dock asks to update it again.
 	if (obs_service_t *old = obs_frontend_get_streaming_service()) {
 		obs_data_t *os = obs_service_get_settings(old);
-		if (str(obs_data_get_string(os, "server")) != server) {
+		const QString oldServer = str(obs_data_get_string(os, "server"));
+		const QString oldHost = hostOf(oldServer).toLower();
+		const bool oursAlready = oldHost == "multistream.gg" || oldHost.endsWith(".multistream.gg");
+		if (oldServer != server && !oursAlready) {
 			char *dir = obs_module_config_path("");
 			os_mkdirs(dir);
 			bfree(dir);

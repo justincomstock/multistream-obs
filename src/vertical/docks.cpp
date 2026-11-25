@@ -1,6 +1,7 @@
 #include "docks.hpp"
 
 #include "canvas.hpp"
+#include "clipcard.hpp"
 #include "../i18n.hpp"
 #include "item-menu.hpp"
 #include "motion.hpp"
@@ -81,8 +82,8 @@ QPointer<QLabel> recLabel;
 QPointer<QToolButton> pauseButton;
 QPointer<QToolButton> camButton; // the vertical picture on OBS Virtual Camera
 QString shownCamError;           // the camera problem last told about
-QPointer<QLabel> noticeLabel; // "Clip saved · Open folder", for a moment
-int shownNotice = 0;
+int shownNotice = 0; // the recorder's notes, shown on the clip card
+int shownClip = 0;   // the last clip save the card showed
 QString shownRecError; // the recording problem last told about
 QPointer<QWidget> importBox;
 QPointer<QLabel> importText;
@@ -1541,6 +1542,29 @@ QWidget *makePreviewDock()
 	previewStack->addWidget(off);
 	previewStack->setCurrentIndex(canvas->uiInt("previewOff", 0) ? 1 : 0);
 	layout->addWidget(previewStack, 1);
+	// After Save clip: the card over the bottom of the picture (clipcard.hpp).
+	clipcard::attach(previewStack, {[]() {
+						QString error;
+						if (!canvas->recorder->startReplay(error)) {
+							shownRecError = error;
+							warn(error);
+							return;
+						}
+						const int s = canvas->recorder->state().value("replaySeconds").toInt();
+						clipcard::note(mt("Vertical.ReplayIsOn"),
+							       mt("Vertical.ReplayIsOnWhy")
+								       .arg(s >= 60 && s % 60 == 0 ? mt(s >= 120 ? "Vertical.MinutesOther" : "Vertical.MinutesOne").arg(s / 60)
+												   : mt("Vertical.Seconds").arg(s)),
+							       true);
+						refreshRecord();
+					},
+					[]() {
+						QString error;
+						canvas->recorder->saveReplay(error); // a refusal shows on the card
+						refreshRecord();
+					}});
+	shownClip = canvas->recorder ? canvas->recorder->state().value("clip").toObject().value("seq").toInt() : 0;
+	shownNotice = canvas->recorder ? canvas->recorder->state().value("noticeSeq").toInt() : 0;
 
 	// Recording and replay buffer of the vertical picture.
 	auto *bar = new QHBoxLayout();
@@ -1579,9 +1603,10 @@ QWidget *makePreviewDock()
 	});
 	saveButton = toolButton(mt("Vertical.SaveClip"), mt("Vertical.SaveClipTip"), "ghost");
 	QObject::connect(saveButton, &QToolButton::clicked, saveButton, []() {
+		// Saving, saved or why not: the card over the picture says.
 		QString error;
-		if (!canvas->recorder->saveReplay(error))
-			warn(error);
+		canvas->recorder->saveReplay(error);
+		refreshRecord();
 	});
 	// Sends the vertical picture to OBS Virtual Camera (TikTok Live Studio,
 	// Discord, Zoom...). There's one OBS camera: when OBS's own is on with the
@@ -1672,13 +1697,6 @@ QWidget *makePreviewDock()
 	bar->addStretch(1);
 	recLabel = roleLabel(QString(), "warn");
 	bar->addWidget(recLabel);
-	noticeLabel = roleLabel(QString(), "muted");
-	noticeLabel->setTextFormat(Qt::RichText);
-	noticeLabel->setVisible(false);
-	QObject::connect(noticeLabel, &QLabel::linkActivated, noticeLabel, [](const QString &dir) {
-		QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
-	});
-	bar->addWidget(noticeLabel);
 	bar->addWidget(more);
 	layout->addLayout(bar);
 	// A narrow dock: shorter button words, then icons; no size next to the scene.
@@ -1717,9 +1735,15 @@ void refreshRecord()
 	replayButton->setChecked(rep);
 	setWords(replayButton, rep && recordWords == 2 ? mt("Vertical.ReplayOn") : mt("Vertical.Replay"),
 		 recordWords == 2 ? QStringList{mt("Vertical.Replay"), mt("Vertical.ReplayOn")} : QStringList{mt("Vertical.Replay")});
-	saveButton->setText(recordWords == 2 ? mt("Vertical.SaveClip") : mt("Vertical.Save"));
+	const QJsonObject clip = st.value("clip").toObject();
+	const bool saving = clip.value("phase").toString() == "saving";
+	if (recordWords)
+		setWords(saveButton, saving ? mt("Vertical.Saving") : mt(recordWords == 2 ? "Vertical.SaveClip" : "Vertical.Save"),
+			 {mt(recordWords == 2 ? "Vertical.SaveClip" : "Vertical.Save"), mt("Vertical.Saving")});
+	else
+		saveButton->setText(mt("Vertical.Save"));
 	replayButton->setToolTip(rep ? mt("Vertical.ReplayRunningTip") : mt("Vertical.ReplayStartTip"));
-	saveButton->setEnabled(rep);
+	saveButton->setEnabled(rep && !saving);
 	const bool paused = st.value("paused").toBool();
 	setWords(pauseButton, recordWords == 2 ? mt(paused ? "Vertical.Resume" : "Vertical.Pause") : (paused ? "\u25b6" : "\u275a\u275a"),
 		 recordWords == 2 ? QStringList{mt("Vertical.Pause"), mt("Vertical.Resume")}
@@ -1728,21 +1752,16 @@ void refreshRecord()
 	pauseButton->setToolTip(mt(paused ? "Vertical.PausedTip" : "Vertical.PauseTip"));
 	if (paused)
 		recButton->setToolTip(mt("Vertical.PausedFile").arg(st.value("lastFile").toString()));
-	// Something just happened: say so for a few seconds (a clip saved, a hotkey
-	// that didn't work, a collection switch).
+	// A clip asked for, saved or not saved (from the button, the hotkey or
+	// OBS's own Save Replay): the card over the picture.
+	if (const int seq = clip.value("seq").toInt(); seq != shownClip) {
+		shownClip = seq;
+		clipcard::show(clip, canvas->recorder->clipStill());
+	}
+	// Something else just happened (a collection switch): the same card says so.
 	if (const int seq = st.value("noticeSeq").toInt(); seq != shownNotice) {
 		shownNotice = seq;
-		const QString file = st.value("noticeFile").toString();
-		QString text = st.value("notice").toString().toHtmlEscaped();
-		if (!file.isEmpty())
-			text += QString(" · <a href=\"%1\">%2</a>").arg(QFileInfo(file).absolutePath().toHtmlEscaped(), mt("Vertical.OpenFolder").toHtmlEscaped());
-		noticeLabel->setText(text);
-		noticeLabel->setToolTip(file.isEmpty() ? st.value("notice").toString() : file);
-		vmotion::foldTo(noticeLabel, true, true);
-		QTimer::singleShot(file.isEmpty() ? 12000 : 8000, noticeLabel, [seq]() {
-			if (noticeLabel && shownNotice == seq)
-				vmotion::foldTo(noticeLabel, false, true);
-		});
+		clipcard::note(st.value("notice").toString(), QString(), false);
 	}
 	const QString err = st.value("error").toString();
 	// "Not recording" folds in and out; its words stay while it leaves.
@@ -2037,11 +2056,13 @@ void close()
 		}
 	}
 	PreviewWidget::closeProjectors();
+	clipcard::close();
 }
 
 QJsonObject report()
 {
 	QJsonObject o;
+	o["clipCard"] = clipcard::report();
 	auto *main = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 	if (main) {
 		o["window"] = QJsonObject{{"width", main->width()}, {"height", main->height()}};

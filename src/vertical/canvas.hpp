@@ -233,3 +233,10 @@ private:
 	//   collections: {name: {scene, order: [{uuid}], links: [{main, vertical}], audio}}}
 	obs_data_t *config_ = nullptr;
 };
+
+class QImage;
+// A still of the picture as it is right now, `width` pixels wide (its height
+// follows the picture's shape): the vertical canvas's when `c` is given, else
+// OBS's finished program picture. A null image when there's no picture yet.
+// A few hundred microseconds of GPU at 320 px. UI thread.
+QImage renderStill(obs_canvas_t *c, uint32_t width);

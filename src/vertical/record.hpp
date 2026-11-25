@@ -2,8 +2,11 @@
 
 #include <obs.h>
 
+#include <QImage>
 #include <QJsonObject>
 #include <QString>
+
+#include <memory>
 
 class VerticalCanvas;
 
@@ -33,8 +36,14 @@ public:
 
 	// {recording, paused, replay, followMain, format, replaySeconds, bitrate
 	//  (0: same as the main stream's), lastFile, lastReplay, error, notice,
-	//  noticeSeq, noticeFile}
+	//  noticeSeq, noticeFile, clip}
+	// clip: the last clip save, for the card in the Vertical Preview:
+	//  {seq, phase: "saving"|"saved"|"failed", reason: "off"|"write" (failed),
+	//   seconds (how much it holds), at (ms since 1970), count (clips saved
+	//   since Replay started), file (saved)}
 	QJsonObject state() const;
+	// The vertical picture the moment the last clip was asked for: its last frame.
+	QImage clipStill() const { return clipStill_; }
 	// Any of {followMain, format: "mp4"|"mkv", replaySeconds, bitrate}.
 	void configure(const QJsonObject &in);
 
@@ -46,6 +55,7 @@ private:
 	void save() const;
 	// Something to tell the streamer in the Vertical Preview for a moment.
 	void notify(const QString &text, const QString &file = QString());
+	void clipFailed(const QString &reason);
 	void registerHotkeys();
 	static void onRecordStop(void *data, calldata_t *cd);
 	static void onReplayStop(void *data, calldata_t *cd);
@@ -68,6 +78,12 @@ private:
 	QString notice_;
 	QString noticeFile_;
 	int noticeSeq_ = 0;
+	QJsonObject clip_;
+	QImage clipStill_;
+	qint64 replayStartedAt_ = 0;
+	int clipCount_ = 0;
+	// False once OBS shuts down, for timers that outlive a save.
+	std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 	// Recording through a scene collection switch (its canvas goes away).
 	bool resumeRecord_ = false;
 	bool resumeReplay_ = false;

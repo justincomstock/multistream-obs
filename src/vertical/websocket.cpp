@@ -103,56 +103,17 @@ QJsonObject programStill(const QJsonObject &in)
 	const bool vertical = in.value("feed").toString() == "vertical";
 	const uint32_t w = uint32_t(std::clamp(in.value("width").toInt(320), 64, 640));
 	obs_canvas_t *c = vertical ? canvas->canvasRef() : nullptr;
-	struct obs_video_info ovi = {};
-	const bool info = vertical ? (c && obs_canvas_get_video_info(c, &ovi)) : obs_get_video_info(&ovi);
-	if (!info || !ovi.base_width || !ovi.base_height) {
-		obs_canvas_release(c);
-		return fail(mt("Obs.NoPictureYet"));
-	}
-	const uint32_t h =
-		std::max<uint32_t>(2, uint32_t(std::lround(double(w) * ovi.base_height / ovi.base_width)) & ~1u);
-
-	std::vector<uint8_t> pixels;
-	uint32_t linesize = 0;
-	obs_enter_graphics();
-	gs_texrender_t *tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-	gs_stagesurf_t *stage = gs_stagesurface_create(w, h, GS_RGBA);
-	if (tr && stage && gs_texrender_begin(tr, w, h)) {
-		struct vec4 clear;
-		vec4_zero(&clear);
-		gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
-		gs_ortho(0.0f, float(ovi.base_width), 0.0f, float(ovi.base_height), -100.0f, 100.0f);
-		if (vertical)
-			obs_render_canvas_texture(c);
-		else
-			obs_render_main_texture();
-		gs_texrender_end(tr);
-		gs_stage_texture(stage, gs_texrender_get_texture(tr));
-		uint8_t *data = nullptr;
-		if (gs_stagesurface_map(stage, &data, &linesize)) {
-			pixels.assign(data, data + size_t(linesize) * h);
-			gs_stagesurface_unmap(stage);
-		}
-	}
-	if (stage)
-		gs_stagesurface_destroy(stage);
-	if (tr)
-		gs_texrender_destroy(tr);
-	obs_leave_graphics();
+	const QImage still = vertical && !c ? QImage() : renderStill(c, w);
 	obs_canvas_release(c);
-	if (pixels.empty())
-		return fail(mt("Obs.NoPictureYet"));
-
-	const QImage rgba(pixels.data(), int(w), int(h), int(linesize), QImage::Format_RGBA8888);
 	QByteArray jpg;
 	QBuffer buf(&jpg);
 	buf.open(QIODevice::WriteOnly);
-	if (!rgba.convertToFormat(QImage::Format_RGB888).save(&buf, "JPG", 70))
+	if (still.isNull() || !still.save(&buf, "JPG", 70))
 		return fail(mt("Obs.NoPictureYet"));
 	QJsonObject o;
 	o["image"] = QStringLiteral("data:image/jpeg;base64,") + QString::fromLatin1(jpg.toBase64());
-	o["width"] = double(w);
-	o["height"] = double(h);
+	o["width"] = double(still.width());
+	o["height"] = double(still.height());
 	return o;
 }
 

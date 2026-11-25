@@ -57,6 +57,7 @@ target_sources(
     src/vertical/arrange.cpp
     src/vertical/audio-mix.cpp
     src/vertical/canvas.cpp
+    src/vertical/clipcard.cpp
     src/vertical/docks.cpp
     src/vertical/item-menu.cpp
     src/vertical/items.cpp
